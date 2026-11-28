@@ -8,12 +8,14 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::Arc;
+use futures::channel::oneshot;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
-/// Web images are decoded no larger than this (Shorts covers come as 1080x1920,
-/// but are never drawn that big); every image stays decoded in memory.
-const MAX_W: u32 = 1280;
-const MAX_H: u32 = 720;
+/// Web images are decoded to at most this many pixels (854x480), keeping their
+/// shape: cards get 1280x720 thumbnails but draw them about 350 px wide, so
+/// decoding them whole took 3.7 MB each (and as much again on the GPU). Wide
+/// channel banners still come out about 1570 px wide.
+const MAX_PIXELS: u64 = 854 * 480;
 
 type LoadResult = Result<Arc<RenderImage>, ImageCacheError>;
 
@@ -26,14 +28,14 @@ enum Slot {
     /// app assets (logo SVGs and such): gpui's own loader
     Gpui(ImageCacheItem),
     /// web images: fetched and downscaled here
-    Web(Rc<RefCell<Own>>, Task<()>),
+    Web { state: Rc<RefCell<Own>>, _task: Task<()> },
 }
 
 impl Slot {
     fn get(&self) -> Option<LoadResult> {
         match self {
             Slot::Gpui(i) => i.get(),
-            Slot::Web(st, _) => match &*st.borrow() {
+            Slot::Web { state, .. } => match &*state.borrow() {
                 Own::Done(r) => Some(r.clone()),
                 Own::Loading(_) => None,
             },
@@ -43,7 +45,7 @@ impl Slot {
     fn use_image(&self, window: &Window) -> Option<LoadResult> {
         match self {
             Slot::Gpui(i) => i.use_image(window),
-            Slot::Web(st, _) => match &mut *st.borrow_mut() {
+            Slot::Web { state, .. } => match &mut *state.borrow_mut() {
                 Own::Done(r) => Some(r.clone()),
                 Own::Loading(views) => {
                     views.insert(window.current_view());
@@ -59,10 +61,9 @@ impl Slot {
             _ => return Slot::Gpui(ImageCacheItem::new(resource, cx)),
         };
         let state = Rc::new(RefCell::new(Own::Loading(HashSet::default())));
-        let work = cx.background_executor().spawn(async move { fetch_decode(&url) });
         let weak = Rc::downgrade(&state);
         let task = cx.spawn(async move |cx| {
-            let result = work.await.map_err(|e| ImageCacheError::Other(Arc::new(e)));
+            let result = fetch_in_background(url).await.map_err(|e| ImageCacheError::Other(Arc::new(e)));
             let Some(state) = weak.upgrade() else { return };
             let prev = std::mem::replace(&mut *state.borrow_mut(), Own::Done(result));
             if let Own::Loading(views) = prev {
@@ -73,8 +74,33 @@ impl Slot {
                 });
             }
         });
-        Slot::Web(state, task)
+        Slot::Web { state, _task: task }
     }
+}
+
+type ImageRequest = (String, oneshot::Sender<anyhow::Result<Arc<RenderImage>>>);
+
+/// Keep blocking HTTP off GPUI's workers and bound concurrent downloads.
+async fn fetch_in_background(url: String) -> anyhow::Result<Arc<RenderImage>> {
+    static QUEUE: OnceLock<mpsc::Sender<ImageRequest>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<ImageRequest>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        for _ in 0..8 {
+            let receiver = receiver.clone();
+            std::thread::spawn(move || loop {
+                let job = receiver.lock().unwrap().recv();
+                let Ok((url, result)) = job else { break };
+                if !result.is_canceled() {
+                    let _ = result.send(fetch_decode(&url));
+                }
+            });
+        }
+        sender
+    });
+    let (send, receive) = oneshot::channel();
+    queue.send((url, send)).map_err(|_| anyhow::anyhow!("image workers unavailable"))?;
+    receive.await?
 }
 
 /// Downloads an image and decodes it (BGRA, like gpui), shrinking oversized ones.
@@ -85,8 +111,8 @@ fn fetch_decode(url: &str) -> anyhow::Result<Arc<RenderImage>> {
     }
     let img = image::load_from_memory(&bytes)?;
     let (w, h) = (img.width(), img.height());
-    let mut rgba = if w > MAX_W || h > MAX_H {
-        let k = (MAX_W as f32 / w as f32).min(MAX_H as f32 / h as f32);
+    let mut rgba = if w as u64 * h as u64 > MAX_PIXELS {
+        let k = (MAX_PIXELS as f64 / (w as f64 * h as f64)).sqrt() as f32;
         let (nw, nh) = (((w as f32 * k).round() as u32).max(1), ((h as f32 * k).round() as u32).max(1));
         image::imageops::resize(&img.into_rgba8(), nw, nh, image::imageops::FilterType::Triangle)
     } else {
@@ -155,7 +181,7 @@ fn animated(bytes: &[u8]) -> Option<smallvec::SmallVec<[image::Frame; 1]>> {
 }
 
 /// Decoded images above this are freed, least recently shown first.
-const BUDGET_BYTES: usize = 160 * 1024 * 1024;
+const BUDGET_BYTES: usize = 48 * 1024 * 1024;
 
 struct Entry {
     item: Slot,

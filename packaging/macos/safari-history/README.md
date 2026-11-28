@@ -18,11 +18,12 @@ documented developer approval before it will load the extension.
 [Running a Safari web extension](https://developer.apple.com/documentation/safariservices/running-your-safari-web-extension)
 
 1. Open the prototype, then enable **Stream Tube Watch History** in Safari.
-2. In Stream Tube, select **Settings → General → YouTube watch history → Connect**.
+2. In Stream Tube, select **Connect** next to **YouTube watch history and
+   comment reactions** under **Settings → General**.
    Choose **Use Safari** if the dialog also shows a Chromium browser.
 3. In the YouTube tab, sign in and open **Stream Tube Watch History** from
    the Safari toolbar. Grant access to YouTube when Safari asks, then reopen the
-   extension if needed and choose **Connect this YouTube session**.
+   extension if needed and choose **Connect YouTube**.
 4. Return to Stream Tube and check that Settings shows **Connected as**. Play a
    video in the native player with watch history enabled. Let it play for at
    least 30 seconds, then close the player and note the position.
@@ -32,8 +33,48 @@ documented developer approval before it will load the extension.
 The extension requests access to `www.youtube.com`. After you choose to connect,
 it sends the YouTube session cookies from the active Safari profile to Stream
 Tube over a one-time loopback connection tied to the open dialog. Stream Tube
-uses the session for playback reporting and keeps it in memory until disconnect
-or quit. Reconnect after restarting the prototype.
+uses one connection for playback reporting and comment reactions. It keeps the
+session in memory until you disconnect or quit. Reconnect after restarting the
+prototype. The device-code sign-in for recommendations and subscriptions is optional.
+
+## Like or dislike comments
+
+1. Open a video’s comments in Stream Tube. If the browser account is still
+   disconnected, choose **Connect to react to comments** to open the same
+   connection dialog as in Settings.
+2. Choose **Reload comments** and use the comment’s like or dislike button.
+   Click the selected button again to clear your reaction.
+3. Choose **Reload comments** again to fetch the saved reaction from YouTube.
+
+Voting and reloading happen in Stream Tube. Use **Disconnect** in **Settings →
+General** to stop sharing the session for both watch history and reactions.
+
+In the Apple Silicon 1.0.0 foreground test, the like and dislike each survived
+**Reload comments** on Blender Studio’s [Sprite Fright](https://www.youtube.com/watch?v=_cMxraX_5RE).
+The test reaction was cleared and a final reload confirmed the comment was unrated.
+
+## Build a test copy alongside older prototypes
+
+Set `STREAMTUBE_SAFARI_TEST_ID` to a label for this copy. Use 1–32 lowercase
+ASCII letters, digits or hyphens, with a letter or digit at each end. The label
+also enables Safari packaging.
+
+```bash
+STREAMTUBE_SAFARI_TEST_ID=resume-check RUSTUP_TOOLCHAIN=1.100.0 \
+  bash packaging/macos/build-app.sh "$HOME/Downloads/StreamTube-builds"
+```
+
+Open the printed **Stream Tube Safari Test (resume-check).app** path and enable
+**Stream Tube Watch History (resume-check)** in Safari for the profile you use
+for YouTube. Start **Connect** in that app, then use the extension with the
+same label on the YouTube tab and approve access when Safari asks.
+
+Each label gets its own app and extension identifiers, URL scheme and data
+directory. This example uses
+`~/Library/Application Support/StreamTube Safari Test (resume-check)`. Use a
+different label for each copy you want to keep available side by side. If you
+rebuild with the same label, replace the previous copy with that label so
+Safari has one app bundle for that extension identifier.
 
 ## Playback diagnostics
 
@@ -88,3 +129,33 @@ position, sent the final watch-time report and exited Stream Tube.
 
 The preceding periodic report was at `0:25`. The History entry resumed at the
 final position to the whole second.
+
+## Verified last-window close with `resume-check`
+
+On Apple Silicon, the 0.7.5-alpha build packaged with
+`STREAMTUBE_SAFARI_TEST_ID=resume-check` connected through **Stream Tube Watch
+History (resume-check)** alongside the older Safari prototypes. The test played
+*Sintel* from the beginning and closed the last window during playback.
+[Sintel – Open Movie by Blender Foundation](https://www.youtube.com/watch?v=eRsGyueVLvQ)
+
+| Check | Observed result |
+| --- | --- |
+| Position saved when the last window closed | 42.042 seconds |
+| Final watch-time report | `cmt=42.042`, `final=1`, HTTP `204` |
+| Opened directly from YouTube Watch History in Safari | Safari opened the video with `t=42s`. Playback resumed at `0:42` and advanced to `0:44`. |
+
+## Verified last-window close from PR #243
+
+On Apple Silicon, the opt-in build from
+[PR #243](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/pull/243) at
+commit `9975d9a` connected through **Stream Tube Watch History (pr243-resume-check)**.
+The test played [Sprite Fright](https://www.youtube.com/watch?v=_cMxraX_5RE) from
+the beginning and used **⌘W** to close the last Stream Tube window during playback.
+
+| Check | Observed result |
+| --- | --- |
+| Position saved when the last window closed | 43.208 seconds, confirmed in Stream Tube’s local history |
+| Final watch-time report | `cmt=43.208`, `final=1`, HTTP `204` |
+| Opened directly from YouTube Watch History in Safari | Safari opened the video with `t=43s`. Playback resumed at `0:43` and advanced to `0:46`. |
+
+The preceding periodic report was at `0:40`. Safari resumed at the final close position to the whole second.

@@ -1,5 +1,6 @@
 //! In-app updates from the project's GitHub releases (pre-releases included).
 use crate::api::http;
+use crate::i18n::tf;
 use crate::store;
 use crate::ui::{blocking, toast};
 use gpui_kit::*;
@@ -8,6 +9,10 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const REPO: &str = "Avaneesh-Inamdar/Stream-Tube-Desktop";
+/// Where release files may come from. The project is moving to the StreamTubeProject
+/// organization; once it has, GitHub serves the files from there, so versions from
+/// before the move have to accept both places to keep updating.
+const RELEASE_REPOS: [&str; 2] = [REPO, "StreamTubeProject/Stream-Tube-Desktop"];
 pub const RELEASES_PAGE: &str = "https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/releases";
 
 #[derive(Clone, Debug)]
@@ -97,7 +102,8 @@ fn pick_asset(assets: &[Value]) -> Option<Asset> {
         let url = a.get("browser_download_url")?.as_str()?;
         // only files of this project's releases, saved under a plain file name
         let plain = !name.is_empty() && !name.contains(['/', '\\', ':']) && !name.starts_with('.');
-        if !plain || !url.starts_with(&format!("https://github.com/{REPO}/releases/download/")) {
+        let ours = RELEASE_REPOS.iter().any(|repo| url.starts_with(&format!("https://github.com/{repo}/releases/download/")));
+        if !plain || !ours {
             return None;
         }
         let sha256 = a
@@ -159,7 +165,7 @@ fn set_status(st: Status, cx: &mut App) {
 /// Checks GitHub. `manual` reports "up to date" and errors; the startup check stays
 /// quiet unless there is something new (and not skipped).
 pub fn check_now(manual: bool, cx: &mut App) {
-    if BUSY.swap(true, Ordering::SeqCst) {
+    if matches!(cx.default_global::<Updates>().status, Status::Downloading(_, _)) || BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
     set_status(Status::Checking, cx);
@@ -177,13 +183,13 @@ pub fn check_now(manual: bool, cx: &mut App) {
             Ok(None) => {
                 set_status(Status::UpToDate, cx);
                 if manual {
-                    toast(cx, format!("Stream Tube {} is the latest version", current_version()));
+                    toast(cx, tf!("Stream Tube {0} is the latest version", current_version()));
                 }
             }
             Err(e) => {
                 set_status(if manual { Status::Error(e.to_string()) } else { Status::Idle }, cx);
                 if manual {
-                    toast(cx, format!("Could not check for updates: {e}"));
+                    toast(cx, tf!("Could not check for updates: {0}", e));
                 }
             }
         });
@@ -234,7 +240,8 @@ pub fn install(cx: &mut App) {
     let r2 = result.clone();
     std::thread::spawn(move || {
         let res = (|| -> Result<std::path::PathBuf> {
-            let dir = std::env::temp_dir().join("streamtube-update");
+            // the app's own folder, not a predictable path in a shared temp folder
+            let dir = crate::store::data_dir().join("update");
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir)?;
             let path = dir.join(&name);
@@ -273,31 +280,71 @@ pub fn install(cx: &mut App) {
             cx.update(|cx| set_status(Status::Downloading(rel2, p), cx));
         };
         cx.update(|cx| match res {
-            Ok(path) => run_installer(&path, cx),
+            Ok(path) => run_installer(&path, rel, cx),
             Err(e) => {
                 set_status(Status::Available(rel), cx);
-                toast(cx, format!("Update failed: {e}"));
+                toast(cx, tf!("Update failed: {0}", e));
             }
         });
     })
     .detach();
 }
 
-fn run_installer(path: &std::path::Path, cx: &mut App) {
-    let mut c = std::process::Command::new(path);
-    c.args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]);
-    match c.spawn() {
+fn installer_command(path: &std::path::Path, executable: Option<&std::path::Path>) -> std::process::Command {
+    let mut command = std::process::Command::new(path);
+    command.args(["/SP-", "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]);
+    if let Some(dir) = executable.and_then(portable_dir) {
+        let mut destination = std::ffi::OsString::from("/DIR=");
+        destination.push(dir);
+        command.arg("/PORTABLEUPDATE=1").arg(destination);
+    }
+    command
+}
+
+fn portable_dir(executable: &std::path::Path) -> Option<&std::path::Path> {
+    let dir = executable.parent()?;
+    let name = executable.file_name()?.to_str()?;
+    let portable = dir.join("streamtube.portable").is_file() || dir.join("README.md").is_file();
+    (name.eq_ignore_ascii_case("streamtube.exe") && portable && dir.join("libmpv-2.dll").is_file()).then_some(dir)
+}
+
+fn run_installer(path: &std::path::Path, rel: Release, cx: &mut App) {
+    let executable = std::env::current_exe().ok();
+    let mut command = installer_command(path, executable.as_deref());
+    match command.spawn() {
         Ok(_) => {
             store::kv_set("update_skip", "");
+            crate::flush_watch_history(cx);
             cx.quit();
         }
-        Err(e) => toast(cx, format!("Could not start the installer: {e}")),
+        Err(e) => {
+            set_status(Status::Available(rel), cx);
+            toast(cx, tf!("Could not start the installer: {0}", e));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer, pick_asset};
+    use super::{installer_command, is_newer, pick_asset};
+
+    #[test]
+    fn portable_update_targets_the_running_copy() {
+        let dir = crate::store::data_dir().join("Папка Stream Tube");
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("streamtube.exe");
+        let setup = std::path::Path::new("update-setup.exe");
+        std::fs::write(dir.join("libmpv-2.dll"), []).unwrap();
+        assert!(!installer_command(setup, Some(&executable)).get_args().any(|arg| arg == "/PORTABLEUPDATE=1"));
+
+        // ZIPs released before the marker shipped include the README.
+        std::fs::write(dir.join("README.md"), []).unwrap();
+        let command = installer_command(setup, Some(&executable));
+        let mut destination = std::ffi::OsString::from("/DIR=");
+        destination.push(dir);
+        assert!(command.get_args().any(|arg| arg == "/PORTABLEUPDATE=1"));
+        assert!(command.get_args().any(|arg| arg == destination));
+    }
     #[test]
     fn versions() {
         assert!(is_newer("v0.1.0", "0.1.0-alpha"));
@@ -320,5 +367,9 @@ mod tests {
         // another repository, or a name that is a path
         assert!(pick_asset(&[asset(&good, &format!("https://github.com/someone/else/releases/download/v1.0.0/{good}"))]).is_none());
         assert!(pick_asset(&[asset(&format!("..\\{good}"), &format!("https://github.com/{}/releases/download/v1.0.0/x", super::REPO))]).is_none());
+        // the organization the project is moving to, but not names that only start the same
+        assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_some());
+        assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop-fork/releases/download/v1.0.0/{good}"))]).is_none());
+        assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProjectX/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_none());
     }
 }

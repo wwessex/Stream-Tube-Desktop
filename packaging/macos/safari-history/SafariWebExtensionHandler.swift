@@ -11,9 +11,14 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
               let token = message["token"] as? String,
               token.utf8.count == 43,
               token.utf8.allSatisfy(Self.isTokenByte),
+              let purpose = message["purpose"] as? String, purpose == "history-and-reactions",
               let cookies = message["cookies"] as? [[String: String]],
-              cookies.count <= 20,
-              let payload = try? JSONSerialization.data(withJSONObject: cookies),
+              cookies.count <= 20 else {
+            Self.finish(context, received: false)
+            return
+        }
+        let body: [String: Any] = ["purpose": purpose, "cookies": cookies]
+        guard let payload = try? JSONSerialization.data(withJSONObject: body),
               payload.count <= 16_384 else {
             Self.finish(context, received: false)
             return

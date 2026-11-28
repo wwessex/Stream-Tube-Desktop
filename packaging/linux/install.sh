@@ -3,7 +3,7 @@
 # Usage: ./install.sh            install
 #        ./install.sh --uninstall remove
 set -e
-here="$(cd "$(dirname "$0")" && pwd)"
+here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 bin="$HOME/.local/bin"
 apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Stream Tube Watch History",
-  "version": "0.3",
-  "description": "Connect YouTube in Safari to Stream Tube for watch history during this session.",
+  "version": "0.4",
+  "description": "Connect YouTube in Safari to Stream Tube for watch history and comment reactions during this session.",
   "permissions": [
     "cookies",
     "nativeMessaging"

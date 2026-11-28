@@ -63,6 +63,8 @@ pub struct WindowsWindowState {
     pub hovered: Cell<bool>,
     pub last_visibility: Cell<Option<WindowVisibility>>,
     pub direct_manipulation: DirectManipulationHandler,
+    // Stream Tube patch: keep the scroll target under the start of a touch pan.
+    pub(crate) touch_pan: Cell<Option<(Point<Pixels>, Pixels)>>,
 
     pub renderer: RefCell<DirectXRenderer>,
     /// Set when the next `draw_window` call must be treated as a forced
@@ -191,6 +193,7 @@ impl WindowsWindowState {
             invalidate_devices,
             draw_coordinator,
             direct_manipulation,
+            touch_pan: Cell::new(None),
             a11y: RefCell::new(None),
             mouse_position: Cell::new(Point::default()),
         })

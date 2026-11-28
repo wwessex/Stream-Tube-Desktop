@@ -1,0 +1,50 @@
+plugins {
+    id 'com.android.application' version '8.13.0'
+}
+
+def ferryInputs = file(providers.gradleProperty('ferryInputs').get())
+def ferryGenerated = file(providers.gradleProperty('ferryGenerated').get())
+def slintJava = file(providers.gradleProperty('slintJava').get())
+
+android {
+    namespace 'io.github.shiroksh.streamtube'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'io.github.shiroksh.streamtube'
+        minSdk 26
+        targetSdk 36
+        versionCode providers.gradleProperty('streamTubeVersionCode').get().toInteger()
+        versionName providers.gradleProperty('streamTubeVersion').get()
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile new File(ferryInputs, 'AndroidManifest.xml')
+            res.srcDir new File(ferryGenerated, 'res')
+            java.srcDirs(
+                new File(ferryGenerated, 'java'),
+                slintJava,
+                '../src/features/player/ui',
+                '../src/features/account/ui'
+            )
+            jniLibs.srcDir new File(ferryInputs, 'jniLibs')
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+            keepDebugSymbols += ['**/libstream_tube_android.so']
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.google.android.gms:play-services-auth:22.0.0'
+}

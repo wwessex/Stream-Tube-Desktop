@@ -168,6 +168,12 @@ pub struct Votes {
 
 pub fn ryd_votes(video_id: &str) -> Result<Votes> {
     let v = http::get_json(&format!("https://returnyoutubedislikeapi.com/votes?videoId={video_id}"))?;
+    // a video RYD hasn't seen yet comes back with every count at zero: no data,
+    // not "0 likes", so YouTube's own count is shown instead
+    let count = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    if count("likes") == 0 && count("dislikes") == 0 && count("viewCount") == 0 {
+        anyhow::bail!("Return YouTube Dislike has no counts for this video yet");
+    }
     Ok(Votes {
         likes: v.get("likes").and_then(Value::as_u64).unwrap_or(0),
         dislikes: v.get("dislikes").and_then(Value::as_u64).unwrap_or(0),
@@ -326,13 +332,21 @@ pub fn sponsor_user_info(server: &str, private_id: &str) -> Result<SbUserInfo> {
 pub fn format_saved_minutes(m: f64) -> String {
     let total = m.max(0.0).round() as u64;
     let (d, h, min) = (total / 1440, (total % 1440) / 60, total % 60);
-    let plural = |n: u64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    let unit = |n: u64, one, many| crate::i18n::format(if n == 1 { one } else { many }, &[&n]);
     if d > 0 {
-        format!("{} {}", plural(d, "day"), plural(h, "hour"))
+        format!(
+            "{} {}",
+            unit(d, "{0} day", "{0} days"),
+            unit(h, "{0} hour", "{0} hours")
+        )
     } else if h > 0 {
-        format!("{} {}", plural(h, "hour"), plural(min, "minute"))
+        format!(
+            "{} {}",
+            unit(h, "{0} hour", "{0} hours"),
+            unit(min, "{0} minute", "{0} minutes")
+        )
     } else {
-        plural(min, "minute")
+        unit(min, "{0} minute", "{0} minutes")
     }
 }
 

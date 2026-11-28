@@ -20,8 +20,9 @@ function waitForStreamTube() {
         port.onMessage.addListener((message) => {
             const payload = message?.userInfo ?? message;
             if (/^[1-9][0-9]{0,4}$/.test(payload?.port) && Number(payload.port) <= 65535
-                    && /^[A-Za-z0-9_-]{43}$/.test(payload?.token)) {
-                finish({ port: payload.port, token: payload.token });
+                    && /^[A-Za-z0-9_-]{43}$/.test(payload?.token)
+                    && payload.purpose === "history-and-reactions") {
+                finish({ port: payload.port, token: payload.token, purpose: payload.purpose });
             }
         });
         port.onDisconnect.addListener(() => finish(null));

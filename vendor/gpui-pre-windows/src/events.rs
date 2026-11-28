@@ -10,7 +10,7 @@ use windows::{
         UI::{
             Controls::*,
             HiDpi::*,
-            Input::{Ime::*, KeyboardAndMouse::*},
+            Input::{Ime::*, KeyboardAndMouse::*, Touch::*},
             WindowsAndMessaging::*,
         },
     },
@@ -146,6 +146,9 @@ impl WindowsWindowInner {
             }
             WM_MOUSEWHEEL => self.handle_mouse_wheel_msg(handle, wparam, lparam),
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel_msg(handle, wparam, lparam),
+            // Stream Tube patch: the Direct Manipulation path handles precision touchpads.
+            WM_GESTURENOTIFY => self.configure_touch_pan(handle),
+            WM_GESTURE => self.handle_touch_pan(handle, lparam),
             WM_SYSKEYUP => self.handle_syskeyup_msg(wparam, lparam),
             WM_KEYUP => self.handle_keyup_msg(wparam, lparam),
             WM_CHAR => self.handle_char_msg(wparam),
@@ -640,6 +643,59 @@ impl WindowsWindowInner {
         self.state.callbacks.input.set(Some(func));
 
         if handled { Some(0) } else { Some(1) }
+    }
+
+    fn configure_touch_pan(&self, handle: HWND) -> Option<isize> {
+        let config = GESTURECONFIG {
+            dwID: GID_PAN,
+            dwWant: GC_PAN.0 | GC_PAN_WITH_SINGLE_FINGER_VERTICALLY.0 | GC_PAN_WITH_INERTIA.0,
+            dwBlock: 0,
+        };
+        // Leave horizontal single-finger input to the default handler for the seek and volume sliders.
+        unsafe { SetGestureConfig(handle, 0, &[config], std::mem::size_of::<GESTURECONFIG>() as u32).log_err() };
+        None
+    }
+
+    fn handle_touch_pan(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+        const BEGIN: u32 = 1;
+        const END: u32 = 4;
+        let gesture = HGESTUREINFO(lparam.0 as _);
+        let mut info = GESTUREINFO {
+            cbSize: std::mem::size_of::<GESTUREINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetGestureInfo(gesture, &mut info).ok()? };
+        if info.dwID != GID_PAN.0 {
+            return None;
+        }
+        let mut location = POINT { x: info.ptsLocation.x.into(), y: info.ptsLocation.y.into() };
+        unsafe { ScreenToClient(handle, &mut location).ok().log_err() };
+        let location = logical_point(location.x as f32, location.y as f32, self.state.scale_factor.get());
+        let (origin, previous) = if info.dwFlags & BEGIN != 0 {
+            (location, location.y)
+        } else {
+            self.state.touch_pan.get().unwrap_or((location, location.y))
+        };
+        let phase = if info.dwFlags & END != 0 {
+            self.state.touch_pan.set(None);
+            TouchPhase::Ended
+        } else {
+            self.state.touch_pan.set(Some((origin, location.y)));
+            if info.dwFlags & BEGIN != 0 { TouchPhase::Started } else { TouchPhase::Moved }
+        };
+        if let Some(mut input) = self.state.callbacks.input.take() {
+            input(PlatformInput::Scroll(ScrollEvent {
+                position: origin,
+                delta: ScrollDelta::Pixels(point(px(0.), location.y - previous)),
+                modifiers: current_modifiers(),
+                touch_phase: phase,
+                source: ScrollSource::Touch,
+            }));
+            self.state.callbacks.input.set(Some(input));
+        }
+        // The default window procedure owns handles for gestures we don't consume.
+        unsafe { CloseGestureInfoHandle(gesture).log_err() };
+        Some(0)
     }
 
     fn retrieve_caret_position(&self) -> Option<POINT> {

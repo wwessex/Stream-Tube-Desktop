@@ -42,6 +42,23 @@ pub fn configure_pip_window(window: &Window) {
     }
 }
 
+/// Whether "Swipe between pages" is set to two fingers (System Settings → Trackpad →
+/// More Gestures), as browsers check before going back and forward on a sideways swipe.
+pub fn swipe_between_pages() -> bool {
+    unsafe { objc2::msg_send![objc2::class!(NSEvent), isSwipeTrackingFromScrollEventsEnabled] }
+}
+
+/// Whether scrolling is "natural" (the content follows the fingers), the default.
+pub fn natural_scrolling() -> bool {
+    use objc2::runtime::AnyObject;
+    let key = objc2_foundation::NSString::from_str("com.apple.swipescrolldirection");
+    unsafe {
+        let defaults: Retained<AnyObject> = objc2::msg_send![objc2::class!(NSUserDefaults), standardUserDefaults];
+        let set: Option<Retained<AnyObject>> = objc2::msg_send![&defaults, objectForKey: &*key];
+        set.is_none() || objc2::msg_send![&defaults, boolForKey: &*key]
+    }
+}
+
 actions!(streamtube, [About, Settings, Quit]);
 
 pub fn init_menu(main_window: AnyWindowHandle, cx: &mut App) {
@@ -57,13 +74,20 @@ pub fn init_menu(main_window: AnyWindowHandle, cx: &mut App) {
         KeyBinding::new("cmd-,", Settings, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
-    cx.set_menus([Menu::new("Stream Tube").items([
-        MenuItem::action("About", About),
-        MenuItem::separator(),
-        MenuItem::action("Settings", Settings),
-        MenuItem::separator(),
-        MenuItem::action("Quit Stream Tube", Quit),
-    ])]);
+    cx.set_menus([
+        Menu::new("Stream Tube").items([
+            MenuItem::action("About", About),
+            MenuItem::separator(),
+            MenuItem::action("Settings", Settings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Stream Tube", Quit),
+        ]),
+        Menu::new("View").items([MenuItem::action("Reload Page", crate::ui::app::Reload)]),
+        // AppKit fills the windows menu itself (Fill, Center, Move & Resize…). The tiling
+        // shortcuts and window managers such as Swish tile through those items, with the
+        // system's animation; without them the window only jumps to its new frame
+        Menu::new("Window").items([]),
+    ]);
 }
 
 fn open_settings(main_window: AnyWindowHandle, route: Route, cx: &mut App) {

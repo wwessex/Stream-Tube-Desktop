@@ -1,0 +1,803 @@
+import { AboutSlint, LineEdit, ListView, ScrollView, Palette } from "std-widgets.slint";
+
+export enum Screen { home, shorts, following, library, search, settings, channel, playlist, language }
+
+export global UiText {
+    in property <string> language;
+    pure callback lookup(string, string) -> string;
+
+    pure public function tr(source: string) -> string {
+        return root.lookup(root.language, source);
+    }
+}
+
+export struct LanguageRow {
+    code: string,
+    name: string,
+    credit: string,
+}
+
+export struct ChannelRow {
+    id: string,
+    name: string,
+}
+
+export struct VideoRow {
+    id: string,
+    title: string,
+    channel: string,
+    channel-id: string,
+    duration: string,
+    views: string,
+    published: string,
+    saved: bool,
+    short: bool,
+    thumbnail: image,
+    has-thumbnail: bool,
+}
+
+enum Glyph { none, home, shorts, following, library, settings, back }
+
+component Symbol inherits Path {
+    in property <Glyph> glyph;
+    in property <color> tint;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: root.tint;
+    stroke-width: 1.8px;
+    fill: transparent;
+    commands: root.glyph == Glyph.home ? "M 3 10 L 12 3 L 21 10 L 21 21 L 15 21 L 15 15 L 9 15 L 9 21 L 3 21 Z"
+        : root.glyph == Glyph.shorts ? "M 6 3 L 18 3 L 18 21 L 6 21 Z M 10 8 L 15 12 L 10 16 Z"
+        : root.glyph == Glyph.following ? "M 3 8 L 21 8 L 21 21 L 3 21 Z M 6 5 L 18 5 M 9 2 L 15 2 M 10 11 L 15 14 L 10 17 Z"
+        : root.glyph == Glyph.library ? "M 7 4 L 20 4 L 20 21 L 7 21 Z M 3 7 L 3 21 M 10 8 L 17 8 M 10 12 L 17 12 M 10 16 L 15 16"
+        : root.glyph == Glyph.settings ? "M 3 6 L 21 6 M 3 12 L 21 12 M 3 18 L 21 18 M 8 3 L 8 9 M 15 9 L 15 15 M 10 15 L 10 21"
+        : root.glyph == Glyph.back ? "M 15 5 L 7 12 L 15 19" : "";
+}
+
+component Action inherits Rectangle {
+    in property <string> label;
+    in property <Glyph> glyph: Glyph.none;
+    in property <string> description: label;
+    in property <bool> active: true;
+    in property <bool> selected;
+    in property <bool> accent;
+    callback pressed;
+
+    min-height: 44px;
+    min-width: 40px;
+    border-radius: 9px;
+    background: active ?
+        (selected || accent ? (touch.pressed ? #ac1f36 : #c8203c) : (touch.pressed ? #363740 : #232429))
+        : #1d1e23;
+    border-color: #f36b82;
+    border-width: keyboard.has-focus ? 1px : 0px;
+    accessible-role: button;
+    accessible-label: description;
+
+    if root.glyph != Glyph.none: Symbol {
+        width: 21px;
+        height: 21px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        glyph: root.glyph;
+        tint: #ebebf1;
+    }
+    if root.glyph == Glyph.none: Text {
+        text: root.label;
+        color: root.active ? #f8f7f9 : #9294a0;
+        font-size: 12px;
+        font-weight: 680;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    keyboard := FocusScope {
+        enabled: root.active;
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.pressed();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea {
+        enabled: root.active;
+        clicked => { root.pressed(); }
+    }
+}
+
+component NavigationItem inherits Rectangle {
+    in property <Glyph> glyph;
+    in property <string> label;
+    in property <bool> selected;
+    callback pressed;
+
+    horizontal-stretch: 1;
+    height: 53px;
+    border-radius: 9px;
+    background: selected ? #331e27 : (touch.pressed ? #282930 : transparent);
+    accessible-role: button;
+    accessible-label: label;
+    border-color: #f36b82;
+    border-width: keyboard.has-focus ? 1px : 0px;
+    VerticalLayout {
+        alignment: center;
+        spacing: 2px;
+        Rectangle {
+            height: 21px;
+            Symbol {
+                width: 21px;
+                height: 21px;
+                x: (parent.width - self.width) / 2;
+                glyph: root.glyph;
+                tint: root.selected ? #ff708b : #ccccd5;
+            }
+        }
+        Text {
+            text: root.label;
+            font-size: 11px;
+            font-weight: root.selected ? 700 : 500;
+            color: root.selected ? #fff2f4 : #bcbcc7;
+            horizontal-alignment: center;
+        }
+    }
+    keyboard := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.pressed();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea { clicked => { root.pressed(); } }
+}
+
+component LanguageItem inherits Rectangle {
+    in property <LanguageRow> entry;
+    in property <bool> selected;
+    callback pressed;
+    height: 57px;
+    border-radius: 8px;
+    background: root.selected ? #30212a : touch.pressed ? #2d2d33 : transparent;
+    border-width: keyboard.has-focus ? 1px : 0px;
+    border-color: #f36b82;
+    accessible-role: button;
+    accessible-label: root.entry.name + (root.entry.credit == "" ? "" : ", " + root.entry.credit);
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: root.entry.code == "system" ? UiText.tr("System") : root.entry.name;
+                color: #faf9fb;
+                font-size: 15px;
+                font-weight: 650;
+            }
+            if root.entry.credit != "": Text {
+                text: root.entry.credit;
+                color: #d3b6bf;
+                font-size: 12px;
+            }
+        }
+        if root.selected: Text {
+            text: "✓";
+            color: #f36b82;
+            font-size: 19px;
+            vertical-alignment: center;
+        }
+    }
+    keyboard := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.pressed();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea { clicked => { root.pressed(); } }
+}
+
+component VideoCard inherits Rectangle {
+    in property <VideoRow> video;
+    callback watch;
+    callback save;
+    callback open-channel;
+    property <length> frame-height: min(self.width * 9 / 16, 255px);
+    height: frame-height + 103px;
+    clip: true;
+
+    VerticalLayout {
+        spacing: 7px;
+        padding-bottom: 12px;
+        preview := Rectangle {
+            height: root.frame-height;
+            border-radius: 11px;
+            clip: true;
+            background: #25262d;
+            border-color: #f36b82;
+            border-width: player-focus.has-focus ? 2px : 0px;
+            accessible-role: button;
+            accessible-label: root.video.title;
+
+            if root.video.has-thumbnail: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.video.thumbnail;
+                image-fit: cover;
+            }
+            if !root.video.has-thumbnail: Text {
+                text: "▶";
+                font-size: 26px;
+                color: #b4b4c0;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if root.video.duration != "" || root.video.short: Rectangle {
+                x: parent.width - self.width - 9px;
+                y: parent.height - self.height - 8px;
+                width: 61px;
+                height: 22px;
+                border-radius: 5px;
+                background: #0e0f13ec;
+                Text {
+                    text: root.video.short ? UiText.tr("Shorts") : root.video.duration;
+                    color: #ffffff;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            player-focus := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Return || event.text == " ") {
+                        root.watch();
+                        return accept;
+                    }
+                    reject
+                }
+            }
+            TouchArea { clicked => { root.watch(); } }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 3px;
+                Rectangle {
+                    height: 37px;
+                    Text {
+                        text: root.video.title;
+                        width: parent.width;
+                        height: parent.height;
+                        horizontal-alignment: left;
+                        vertical-alignment: top;
+                        color: #f8f7f9;
+                        font-size: 15px;
+                        font-weight: 680;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                    TouchArea { clicked => { root.watch(); } }
+                }
+                if root.video.channel != "": Rectangle {
+                    height: 20px;
+                    accessible-role: button;
+                    accessible-label: root.video.channel;
+                    Text {
+                        text: root.video.channel;
+                        width: parent.width;
+                        height: parent.height;
+                        horizontal-alignment: left;
+                        vertical-alignment: center;
+                        color: #d3b6bf;
+                        font-size: 13px;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        enabled: root.video.channel-id != "";
+                        clicked => { root.open-channel(); }
+                    }
+                }
+                if root.video.views != "" || root.video.published != "": Text {
+                    height: 17px;
+                    text: root.video.views + (root.video.views != "" && root.video.published != "" ? ", " : "") + root.video.published;
+                    color: #a5a5b1;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+            Action {
+                width: 78px;
+                height: 44px;
+                label: root.video.saved ? (UiText.tr("Saved")) : (UiText.tr("Save"));
+                selected: root.video.saved;
+                pressed => { root.save(); }
+            }
+        }
+    }
+}
+
+export component StreamTube inherits Window {
+    title: "Stream Tube";
+    min-width: 288px;
+    min-height: 300px;
+    preferred-width: 412px;
+    preferred-height: 820px;
+    background: #151619;
+    init => { Palette.color-scheme = ColorScheme.dark; content-focus.focus(); }
+
+    in property <[VideoRow]> videos;
+    in property <[ChannelRow]> channels;
+    in property <bool> busy;
+    in property <bool> has-more;
+    in property <bool> personal-home;
+    in property <bool> loading-more;
+    in property <bool> load-more-failed;
+    in property <bool> failed;
+    in property <string> message;
+    in property <string> notice;
+    in property <[LanguageRow]> languages;
+    in property <int> language-choice;
+    in property <string> language-label;
+    in property <bool> thumbnails;
+    in property <bool> sponsorblock;
+    in property <bool> dearrow-titles;
+    in property <bool> dearrow-thumbnails;
+    in property <bool> dislike-count;
+    in property <string> channel-name;
+    in property <bool> channel-followed;
+    in property <bool> channel-remote;
+    in property <bool> account-available;
+    in property <bool> account-connected;
+    in property <bool> account-busy;
+    in property <string> account-name;
+    in property <string> account-message;
+    in-out property <string> search-query;
+    in-out property <int> category: 0;
+    in-out property <bool> history-mode: false;
+    in-out property <bool> channels-mode: false;
+    property <bool> showing-channels: screen == Screen.following && channels-mode;
+    in-out property <Screen> screen: Screen.home;
+    in-out property <Screen> tab: Screen.home;
+    property <bool> auxiliary: screen == Screen.search || screen == Screen.settings
+        || screen == Screen.channel || screen == Screen.playlist || screen == Screen.language;
+
+    callback navigate(Screen);
+    callback back;
+    callback reload;
+    callback load-more;
+    callback page-appended(bool);
+    callback open-shorts;
+    callback player-event(int, int, string);
+    callback submit(string);
+    callback watch(string);
+    callback save(string);
+    callback open-channel(string, string);
+    callback follow;
+    callback choose-language(int);
+    callback toggle-thumbnails;
+    callback toggle-extra(int);
+    callback open-source;
+    callback authorize-account;
+    callback refresh-account;
+    callback disconnect-account;
+    callback account-result(int, int, string, string);
+
+    content-focus := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Back && root.auxiliary) {
+                root.back();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    VerticalLayout {
+        padding-top: 6px + root.safe-area-insets.top;
+        padding-bottom: 5px + root.safe-area-insets.bottom;
+        padding-left: 12px + root.safe-area-insets.left;
+        padding-right: 12px + root.safe-area-insets.right;
+        spacing: 7px;
+
+        HorizontalLayout {
+            height: 48px;
+            spacing: 8px;
+
+            if root.auxiliary: Action {
+                width: 43px;
+                glyph: Glyph.back;
+                description: UiText.tr("Back");
+                pressed => { content-focus.focus(); root.back(); }
+            }
+            if !root.auxiliary: Image {
+                source: @image-url("../../assets/icon.png");
+                width: 32px;
+                height: 32px;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.screen == Screen.settings ? (UiText.tr("Settings"))
+                    : root.screen == Screen.search ? (UiText.tr("Search"))
+                    : root.screen == Screen.channel ? root.channel-name
+                    : root.screen == Screen.playlist ? UiText.tr("Playlist")
+                    : root.screen == Screen.language ? UiText.tr("App language")
+                    : root.screen == Screen.shorts ? UiText.tr("Shorts")
+                    : root.screen == Screen.following ? (UiText.tr("Subscriptions"))
+                    : root.screen == Screen.library ? (UiText.tr("Library"))
+                    : "Stream Tube";
+                color: #faf9fb;
+                font-size: 21px;
+                font-weight: 750;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.screen != Screen.search && root.screen != Screen.language: Action {
+                width: 70px;
+                label: UiText.tr("Search");
+                pressed => { root.navigate(Screen.search); }
+            }
+            if root.screen != Screen.settings && root.screen != Screen.language: Action {
+                width: 42px;
+                glyph: Glyph.settings;
+                description: UiText.tr("Settings");
+                pressed => { content-focus.focus(); root.navigate(Screen.settings); }
+            }
+        }
+
+        if root.screen == Screen.home: HorizontalLayout {
+            height: 44px;
+            spacing: 5px;
+            Action {
+                label: root.personal-home ? UiText.tr("For you") : UiText.tr("All");
+                horizontal-stretch: 1;
+                selected: root.category == 0;
+                pressed => { root.category = 0; root.reload(); }
+            }
+            Action {
+                label: UiText.tr("Music");
+                horizontal-stretch: 1;
+                selected: root.category == 1;
+                pressed => { root.category = 1; root.reload(); }
+            }
+            Action {
+                label: UiText.tr("Games");
+                horizontal-stretch: 1;
+                selected: root.category == 2;
+                pressed => { root.category = 2; root.reload(); }
+            }
+            Action {
+                label: UiText.tr("Tech");
+                horizontal-stretch: 1;
+                selected: root.category == 3;
+                pressed => { root.category = 3; root.reload(); }
+            }
+            Action {
+                label: UiText.tr("Live");
+                horizontal-stretch: 1;
+                selected: root.category == 4;
+                pressed => { root.category = 4; root.reload(); }
+            }
+        }
+
+        if root.screen == Screen.following: HorizontalLayout {
+            height: 44px;
+            spacing: 6px;
+            Action {
+                horizontal-stretch: 1;
+                label: UiText.tr("Videos");
+                selected: !root.channels-mode;
+                pressed => { root.channels-mode = false; root.reload(); }
+            }
+            Action {
+                horizontal-stretch: 1;
+                label: UiText.tr("Channels");
+                selected: root.channels-mode;
+                pressed => { root.channels-mode = true; root.reload(); }
+            }
+        }
+
+        if root.screen == Screen.following && !root.account-connected && root.account-available: Action {
+            label: root.account-busy ? (UiText.tr("Waiting for sign-in…"))
+                : (UiText.tr("Sign in to YouTube"));
+            accent: true;
+            active: !root.account-busy;
+            pressed => { root.authorize-account(); }
+        }
+
+        if root.screen == Screen.following && root.account-message != "": Text {
+            text: UiText.tr(root.account-message);
+            color: #e6b3bf;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+
+        if root.screen == Screen.library: HorizontalLayout {
+            height: 44px;
+            spacing: 6px;
+            Action {
+                horizontal-stretch: 1;
+                label: UiText.tr("Saved");
+                selected: !root.history-mode;
+                pressed => { root.history-mode = false; root.reload(); }
+            }
+            Action {
+                horizontal-stretch: 1;
+                label: UiText.tr("History");
+                selected: root.history-mode;
+                pressed => { root.history-mode = true; root.reload(); }
+            }
+        }
+
+        if root.screen == Screen.channel: HorizontalLayout {
+            height: 44px;
+            spacing: 8px;
+            Action {
+                width: 133px;
+                label: root.channel-remote || root.channel-followed
+                    ? UiText.tr("Subscribed")
+                    : UiText.tr("Subscribe");
+                active: !root.channel-remote;
+                selected: root.channel-remote || root.channel-followed;
+                pressed => { root.follow(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        if root.screen == Screen.search: HorizontalLayout {
+            height: 47px;
+            spacing: 7px;
+            query := LineEdit {
+                text <=> root.search-query;
+                placeholder-text: UiText.tr("Search YouTube");
+                accepted => { content-focus.focus(); root.submit(self.text); }
+                horizontal-stretch: 1;
+            }
+            Action {
+                width: 70px;
+                label: UiText.tr("Search");
+                accent: true;
+                active: query.text != "";
+                pressed => { content-focus.focus(); root.submit(query.text); }
+            }
+        }
+
+        if root.screen == Screen.settings: ScrollView {
+            vertical-stretch: 1;
+            mouse-drag-pan-enabled: true;
+            viewport-height: preferences.preferred-height;
+            preferences := VerticalLayout {
+                padding-top: 6px;
+                padding-bottom: 16px;
+                spacing: 9px;
+                Text {
+                    text: root.account-name != "" ? root.account-name : (UiText.tr("YouTube account"));
+                    color: #f6f6fa;
+                    font-size: 16px;
+                    font-weight: 700;
+                    height: 29px;
+                    overflow: elide;
+                }
+                if root.account-available: Action {
+                    label: root.account-busy ? (UiText.tr("Waiting for sign-in…"))
+                        : root.account-connected ? (UiText.tr("Switch account"))
+                        : (UiText.tr("Sign in to YouTube"));
+                    accent: !root.account-connected;
+                    active: !root.account-busy;
+                    pressed => { root.authorize-account(); }
+                }
+                if root.account-connected: HorizontalLayout {
+                    spacing: 6px;
+                    height: 44px;
+                    Action {
+                        horizontal-stretch: 1;
+                        label: UiText.tr("Refresh");
+                        active: !root.account-busy;
+                        pressed => { root.refresh-account(); }
+                    }
+                    Action {
+                        horizontal-stretch: 1;
+                        label: UiText.tr("Disconnect");
+                        pressed => { root.disconnect-account(); }
+                    }
+                }
+                if !root.account-available || root.account-message != "": Text {
+                    text: root.account-message != "" ? UiText.tr(root.account-message)
+                        : (UiText.tr("Google Play services are required"));
+                    wrap: word-wrap;
+                    color: #c3c2ce;
+                    font-size: 13px;
+                }
+                Text {
+                    text: UiText.tr("App language");
+                    color: #f6f6fa;
+                    font-size: 16px;
+                    font-weight: 700;
+                    height: 27px;
+                }
+                Action {
+                    label: root.language-label == "System" ? UiText.tr("System") : root.language-label;
+                    pressed => { root.navigate(Screen.language); }
+                }
+                Action {
+                    label: root.thumbnails ? (UiText.tr("Thumbnails on"))
+                        : (UiText.tr("Thumbnails off"));
+                    pressed => { root.toggle-thumbnails(); }
+                }
+                Text {
+                    text: UiText.tr("SponsorBlock & DeArrow");
+                    color: #f6f6fa;
+                    font-size: 16px;
+                    font-weight: 700;
+                    height: 28px;
+                }
+                Action {
+                    label: UiText.tr("Enable SponsorBlock") + (root.sponsorblock ? "  ✓" : "");
+                    selected: root.sponsorblock;
+                    pressed => { root.toggle-extra(0); }
+                }
+                Action {
+                    label: UiText.tr("DeArrow titles") + (root.dearrow-titles ? "  ✓" : "");
+                    selected: root.dearrow-titles;
+                    pressed => { root.toggle-extra(1); }
+                }
+                Action {
+                    label: UiText.tr("DeArrow thumbnails") + (root.dearrow-thumbnails ? "  ✓" : "");
+                    selected: root.dearrow-thumbnails;
+                    pressed => { root.toggle-extra(2); }
+                }
+                Action {
+                    label: UiText.tr("Return YouTube Dislike") + (root.dislike-count ? "  ✓" : "");
+                    selected: root.dislike-count;
+                    pressed => { root.toggle-extra(3); }
+                }
+                Text {
+                    text: "Stream Tube 0.1.0";
+                    color: #faf9fb;
+                    font-size: 16px;
+                    font-weight: 700;
+                    height: 28px;
+                }
+                Action {
+                    label: UiText.tr("Source code");
+                    pressed => { root.open-source(); }
+                }
+                AboutSlint { height: 86px; }
+            }
+        }
+
+        if root.screen == Screen.language: ListView {
+            vertical-stretch: 1;
+            mouse-drag-pan-enabled: true;
+            for locale[index] in root.languages: LanguageItem {
+                entry: locale;
+                selected: index == root.language-choice;
+                pressed => { root.choose-language(index); }
+            }
+        }
+
+        if root.showing-channels && root.channels.length > 0: ListView {
+            vertical-stretch: 1;
+            mouse-drag-pan-enabled: true;
+            for channel in root.channels: Action {
+                height: 51px;
+                label: channel.name;
+                pressed => { root.open-channel(channel.id, channel.name); }
+            }
+        }
+
+        if root.screen != Screen.settings && root.screen != Screen.language && root.videos.length == 0
+            && (!root.showing-channels || root.channels.length == 0): VerticalLayout {
+            vertical-stretch: 1;
+            padding-top: 11px;
+            spacing: 9px;
+            Text {
+                text: UiText.tr(root.message);
+                color: #c3c2ce;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+            if root.failed: Action {
+                label: UiText.tr("Retry");
+                width: 105px;
+                height: 44px;
+                pressed => { root.reload(); }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+
+        if root.screen == Screen.shorts && root.videos.length > 0: Rectangle {
+            vertical-stretch: 1;
+            Action {
+                width: 220px;
+                height: 44px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                label: UiText.tr("Watch Shorts");
+                accent: true;
+                pressed => { root.open-shorts(); }
+            }
+        }
+
+        if root.screen != Screen.settings && root.screen != Screen.shorts
+            && !root.showing-channels && root.videos.length > 0: list := ListView {
+            vertical-stretch: 1;
+            mouse-drag-pan-enabled: true;
+            scrolled => {
+                if root.has-more && !root.loading-more && !root.load-more-failed
+                    && list.viewport-height + list.viewport-y < list.visible-height * 1.7 {
+                    root.load-more();
+                }
+            }
+            for video in root.videos: VideoCard {
+                width: min(list.visible-width, 560px);
+                x: max(0px, (list.visible-width - self.width) / 2);
+                video: video;
+                watch => { root.watch(video.id); }
+                save => { root.save(video.id); }
+                open-channel => { root.open-channel(video.channel-id, video.channel); }
+            }
+        }
+
+        if root.has-more && (root.loading-more || root.load-more-failed) && root.screen != Screen.shorts: Action {
+            label: root.loading-more ? (UiText.tr("Loading more videos…"))
+                : (UiText.tr("Retry loading more"));
+            active: !root.loading-more;
+            pressed => { root.load-more(); }
+        }
+
+        if root.notice != "": Text {
+            text: UiText.tr(root.notice);
+            color: #ff9cac;
+            font-size: 12px;
+            wrap: word-wrap;
+            height: 28px;
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #2c2d35;
+        }
+
+        HorizontalLayout {
+            height: 53px;
+            spacing: 4px;
+            NavigationItem {
+                glyph: Glyph.home;
+                label: UiText.tr("Home");
+                selected: root.tab == Screen.home;
+                pressed => { content-focus.focus(); root.navigate(Screen.home); }
+            }
+            NavigationItem {
+                glyph: Glyph.shorts;
+                label: UiText.tr("Shorts");
+                selected: root.tab == Screen.shorts;
+                pressed => { content-focus.focus(); root.navigate(Screen.shorts); }
+            }
+            NavigationItem {
+                glyph: Glyph.following;
+                label: UiText.tr("Subscriptions");
+                selected: root.tab == Screen.following;
+                pressed => { content-focus.focus(); root.navigate(Screen.following); }
+            }
+            NavigationItem {
+                glyph: Glyph.library;
+                label: UiText.tr("Library");
+                selected: root.tab == Screen.library;
+                pressed => { content-focus.focus(); root.navigate(Screen.library); }
+            }
+        }
+    }
+}

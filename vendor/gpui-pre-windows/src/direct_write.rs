@@ -1290,7 +1290,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
     fn DrawGlyphRun(
         &self,
         clientdrawingcontext: *const ::core::ffi::c_void,
-        baselineoriginx: f32,
+        _baselineoriginx: f32,
         _baselineoriginy: f32,
         _measuringmode: DWRITE_MEASURING_MODE,
         glyphrun: *const DWRITE_GLYPH_RUN,
@@ -1425,14 +1425,23 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             let cluster_analyzer = ClusterAnalyzer::new(cluster_map, glyph_count);
             let mut utf16_idx = desc.textPosition as usize;
             let mut glyph_idx = 0;
-            let mut glyphs = Vec::with_capacity(glyph_count);
-            // Stream Tube patch: runs are placed at the origin DirectWrite gives
-            // them, because it hands them over in text order, not left to right.
-            // Right-to-left runs (Arabic, Hebrew, ...) list their glyphs in reading
-            // order from that origin leftwards. Placing everything left to right
-            // after the previous run drew such text mirrored.
+            // DirectWrite returns right-to-left glyphs in logical order. Keep the
+            // logical character index with each glyph, then reverse the glyphs
+            // before assigning positions in visual (left-to-right) order. Using
+            // `baselineoriginx` for a RTL run puts the whole run to the left of
+            // its layout bounds, which is why Arabic titles were clipped to a
+            // single trailing glyph in card views.
+            struct TempGlyph {
+                id: GlyphId,
+                index: usize,
+                is_emoji: bool,
+                advance: f32,
+                advance_offset: f32,
+                ascender_offset: f32,
+            }
             let rtl = glyphrun.bidiLevel % 2 == 1;
-            let mut pen = 0.0f32;
+            let run_start_x = context.width;
+            let mut temp_glyphs = Vec::with_capacity(glyph_count);
             for (cluster_utf16_len, cluster_glyph_count) in cluster_analyzer {
                 context.index_converter.advance_to_utf16_ix(utf16_idx);
                 utf16_idx += cluster_utf16_len;
@@ -1445,20 +1454,38 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     let is_emoji =
                         color_font && is_color_glyph(font_face, id, &context.components.factory);
                     let this_glyph_idx = glyph_idx + cluster_glyph_idx;
-                    let offset = glyph_offsets[this_glyph_idx].advanceOffset;
-                    let advance = glyph_advances[this_glyph_idx];
-                    let x = if rtl { baselineoriginx - pen - advance - offset } else { baselineoriginx + pen + offset };
-                    pen += advance;
-                    glyphs.push(ShapedGlyph {
+                    temp_glyphs.push(TempGlyph {
                         id,
-                        position: point(px(x), px(-glyph_offsets[this_glyph_idx].ascenderOffset)),
                         index: context.index_converter.utf8_ix,
                         is_emoji,
+                        advance: glyph_advances[this_glyph_idx],
+                        advance_offset: glyph_offsets[this_glyph_idx].advanceOffset,
+                        ascender_offset: glyph_offsets[this_glyph_idx].ascenderOffset,
                     });
                     context.width += glyph_advances[this_glyph_idx];
                 }
                 glyph_idx += cluster_glyph_count;
             }
+            if rtl {
+                temp_glyphs.reverse();
+            }
+            let mut x = run_start_x;
+            let glyphs = temp_glyphs
+                .into_iter()
+                .map(|glyph| {
+                    // An RTL advance offset is measured in the opposite direction
+                    // before the visual-order reversal.
+                    let offset = if rtl { -glyph.advance_offset } else { glyph.advance_offset };
+                    let shaped = ShapedGlyph {
+                        id: glyph.id,
+                        position: point(px(x + offset), px(-glyph.ascender_offset)),
+                        index: glyph.index,
+                        is_emoji: glyph.is_emoji,
+                    };
+                    x += glyph.advance;
+                    shaped
+                })
+                .collect();
             context.runs.push(ShapedRun { font_id, glyphs });
         }
         Ok(())

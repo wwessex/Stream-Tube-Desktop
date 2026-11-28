@@ -1,4 +1,5 @@
 use crate::api::innertube;
+use crate::i18n::{t, tf};
 use crate::api::types::*;
 use crate::player::controller::player;
 use crate::store;
@@ -21,6 +22,8 @@ pub struct PlaylistPage {
     videos: Load<Vec<VideoItem>>,
     continuation: Option<String>,
     loading_more: bool,
+    load_serial: u64,
+    load_failed: bool,
     scroll: ScrollHandle,
     protected: bool,
     info: Option<PlaylistItem>,
@@ -60,6 +63,7 @@ impl PlaylistPage {
                         this.videos = Load::Ready(p.videos);
                         this.continuation = p.continuation;
                         this.info = Some(p.info);
+                        this.start_loading_remaining(cx);
                     }
                     Err(e) => this.videos = Load::Error(e.to_string()),
                 }
@@ -79,7 +83,7 @@ impl PlaylistPage {
     }
 
     fn make_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let f = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder("Search in playlist"));
+        let f = cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder(t("Search in playlist")));
         cx.observe(&f, |_, _, cx| cx.notify()).detach();
         self.filter = Some(f);
     }
@@ -116,6 +120,8 @@ impl PlaylistPage {
             videos: Load::Loading,
             continuation: None,
             loading_more: false,
+            load_serial: 0,
+            load_failed: false,
             scroll: ScrollHandle::new(),
             protected: false,
             info: None,
@@ -131,38 +137,201 @@ impl PlaylistPage {
             self.title = pl.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Playlist".into());
             self.protected = pl.as_ref().map(|p| p.protected).unwrap_or(false);
             let items = store::playlist_items(id);
-            self.count_text = Some(format!("{} videos", items.len()));
+            self.count_text = Some(tf!("{0} videos", items.len()));
             self.owner = Some(("You".into(), None));
             self.videos = Load::Ready(items);
         }
     }
 
-    fn load_more(&mut self, cx: &mut Context<Self>) {
-        let Some(tok) = self.continuation.clone() else {
-            self.loading_more = false;
+    fn start_loading_remaining(&mut self, cx: &mut Context<Self>) {
+        if self.loading_more || self.continuation.is_none() {
             return;
-        };
+        }
+        let first = self.continuation.clone();
         let authed = self.authed;
+        self.load_serial += 1;
+        let serial = self.load_serial;
+        self.loading_more = true;
+        self.load_failed = false;
         cx.spawn(async move |this, cx| {
-            let res = blocking(move || if authed { crate::api::auth::browse_continue(&tok) } else { innertube::browse_continue(&tok) }).await;
-            let _ = this.update(cx, |this, cx| {
-                this.loading_more = false;
-                match res {
-                    Ok(p) => {
-                        if let Some(v) = this.videos.ready_mut() {
-                            v.extend(p.items.into_iter().filter_map(|i| match i {
-                                Item::Video(v) => Some(v),
-                                _ => None,
-                            }));
-                        }
-                        this.continuation = p.continuation;
+            let mut pager = innertube::PlaylistPager::new(first, innertube::MAX_PLAYLIST_PAGES);
+            while let Some(tok) = pager.take_next() {
+                let res = blocking(move || innertube::playlist_continue(&tok, authed)).await;
+                let keep_going = match res {
+                    Ok((vids, next)) => {
+                        pager.advance(next);
+                        let next_tok = pager.next_token().map(str::to_string);
+                        this.update(cx, |this, cx| {
+                            if this.load_serial != serial {
+                                return false;
+                            }
+                            if let Some(v) = this.videos.ready_mut() {
+                                innertube::append_unique_videos(v, vids);
+                            }
+                            this.continuation = next_tok.clone();
+                            // Pause while another page is on screen (e.g. Watch); rendering resumes it on Back.
+                            let more = next_tok.is_some() && crate::ui::app::is_current_page(cx.entity_id(), cx);
+                            if !more {
+                                this.loading_more = false;
+                            }
+                            cx.notify();
+                            more
+                        })
+                        .unwrap_or(false)
                     }
-                    Err(_) => this.continuation = None,
+                    Err(_) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if this.load_serial == serial {
+                                this.loading_more = false;
+                                this.load_failed = true;
+                                cx.notify();
+                            }
+                        });
+                        false
+                    }
+                };
+                if !keep_going {
+                    break;
                 }
-                cx.notify();
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.load_serial == serial && this.loading_more {
+                    this.loading_more = false;
+                    this.continuation = None;
+                    cx.notify();
+                }
             });
         })
         .detach();
+    }
+
+    fn is_watch_later(&self) -> bool {
+        match &self.source {
+            Source::Remote(id) => id == "WL",
+            Source::Local(_) => self.protected && self.title == "Watch later",
+        }
+    }
+
+    /// Like YouTube's "Remove watched videos": drops every video in the list that is in
+    /// the watch history (the same "watched" as the feeds' Hide watched).
+    fn remove_watched(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let authed = self.authed;
+        let first = self.continuation.take();
+        self.load_serial += 1;
+        let serial = self.load_serial;
+        self.loading_more = first.is_some();
+        self.load_failed = false;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            // the whole list, not only the pages loaded so far
+            let mut more = Vec::new();
+            let mut pager = innertube::PlaylistPager::new(first, innertube::MAX_PLAYLIST_PAGES);
+            while let Some(tok) = pager.take_next() {
+                match blocking(move || innertube::playlist_continue(&tok, authed)).await {
+                    Ok((vids, next)) => {
+                        more.extend(vids);
+                        pager.advance(next);
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.load_serial != serial {
+                    return;
+                }
+                this.loading_more = false;
+                if let Some(v) = this.videos.ready_mut() {
+                    innertube::append_unique_videos(v, more);
+                }
+                cx.notify();
+                let watched: Vec<String> = this.videos.ready().map(|v| v.iter().filter(|v| is_watched(&v.id, cx)).map(|v| v.id.clone()).collect()).unwrap_or_default();
+                if watched.is_empty() {
+                    toast(cx, format!("No watched videos in {}", this.title));
+                    return;
+                }
+                let n = watched.len();
+                let body = format!("{n} watched {} will be removed from {}.", if n == 1 { "video" } else { "videos" }, this.title);
+                let page = cx.entity().downgrade();
+                confirm("Remove watched videos?", &body, "Remove", window, cx, move |_, cx| {
+                    let ids = watched.clone();
+                    let _ = page.update(cx, |this, cx| this.do_remove_watched(ids, cx));
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn do_remove_watched(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        let n = ids.len();
+        let done = format!("Removed {n} watched {}", if n == 1 { "video" } else { "videos" });
+        match &self.source {
+            Source::Local(lid) => {
+                for id in &ids {
+                    store::playlist_remove(*lid, id);
+                }
+                self.reload_local();
+                toast(cx, done);
+                cx.notify();
+            }
+            Source::Remote(pid) => {
+                let pid = pid.clone();
+                cx.spawn(async move |this, cx| {
+                    let ids2 = ids.clone();
+                    let res = blocking(move || crate::api::auth::remove_many_from_playlist(&pid, &ids2)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        match res {
+                            Ok(()) => {
+                                if let Some(v) = this.videos.ready_mut() {
+                                    v.retain(|v| !ids.contains(&v.id));
+                                }
+                                // the whole list is loaded now, so its length is the count
+                                this.count_text = None;
+                                toast(cx, done);
+                            }
+                            Err(_) => toast(cx, t("Couldn't remove the watched videos on your YouTube account")),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Takes one video out of the playlist: the local list, or the signed-in account's.
+    fn remove_video(&mut self, video_id: String, cx: &mut Context<Self>) {
+        match &self.source {
+            Source::Local(lid) => {
+                store::playlist_remove(*lid, &video_id);
+                self.reload_local();
+                toast(cx, t("Removed from playlist"));
+                cx.notify();
+            }
+            Source::Remote(pid) => {
+                let pid = pid.clone();
+                cx.spawn(async move |this, cx| {
+                    let ids = vec![video_id.clone()];
+                    let res = blocking(move || crate::api::auth::remove_many_from_playlist(&pid, &ids)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        match res {
+                            Ok(()) => {
+                                if let Some(v) = this.videos.ready_mut() {
+                                    v.retain(|v| v.id != video_id);
+                                }
+                                // with the whole list loaded its length is the count
+                                if this.continuation.is_none() {
+                                    this.count_text = None;
+                                }
+                                toast(cx, t("Removed from playlist"));
+                            }
+                            Err(_) => toast(cx, t("Couldn't remove the video from your YouTube playlist")),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
     }
 
     fn playlist_param(&self) -> String {
@@ -172,22 +341,27 @@ impl PlaylistPage {
         }
     }
 
-    fn play(&self, shuffle: bool, start_idx: usize, window: &mut Window, cx: &mut App) {
-        let Some(videos) = self.videos.ready().cloned() else { return };
-        if videos.is_empty() {
+    fn play(&mut self, shuffle: bool, start_idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut q) = self.videos.ready().cloned() else { return };
+        if q.is_empty() {
             return;
         }
-        let mut q = videos;
-        let mut idx = start_idx;
+        let mut idx = start_idx.min(q.len() - 1);
         if shuffle {
             use rand::seq::SliceRandom;
             q.shuffle(&mut rand::rng());
             idx = 0;
         }
         let first = q[idx].id.clone();
-        player(cx).update(cx, |p, _| {
-            p.queue = q;
-            p.queue_pos = Some(idx);
+        let continuation = self.continuation.clone();
+        let authed = self.authed;
+        if continuation.is_some() {
+            // Hand off remaining pages to the player so both do not fetch in parallel.
+            self.load_serial += 1;
+            self.loading_more = false;
+        }
+        player(cx).update(cx, |p, cx| {
+            p.set_playlist_queue(q, idx, continuation, authed, shuffle, cx);
         });
         let list = if shuffle { None } else { Some(self.playlist_param()) };
         navigate(Route::Watch { id: first, playlist: list, start: None }, window, cx);
@@ -195,12 +369,23 @@ impl PlaylistPage {
 }
 
 impl Render for PlaylistPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(filter) = &self.filter {
+            localize_placeholder(filter, "Search in playlist", window, cx);
+        }
         let p = pal(cx);
         let has_more = self.continuation.is_some();
-        maybe_load_more(&self.scroll, &mut self.loading_more, has_more, cx, |this, cx| this.load_more(cx));
+        if has_more && !self.loading_more {
+            if !self.load_failed {
+                cx.defer_in_entity(|this, cx| this.start_loading_remaining(cx));
+            } else if near_bottom(&self.scroll, 900.0) {
+                self.load_failed = false;
+                cx.defer_in_entity(|this, cx| this.start_loading_remaining(cx));
+            }
+        }
         let videos = self.videos.ready().cloned().unwrap_or_default();
         let thumb = videos.first().map(|v| v.thumbnail.clone());
+        let radius = rems(0.75 * thumbnail_corner_scale());
         let local_id = if let Source::Local(id) = self.source { Some(id) } else { None };
         let remote_info = self.info.clone();
         let saved = remote_info.as_ref().map(|i| store::is_playlist_saved(&i.id)).unwrap_or(false);
@@ -218,12 +403,24 @@ impl Render for PlaylistPage {
                 div()
                     .w_full()
                     .h(px(176.))
-                    .rounded_xl()
+                    .rounded(radius)
                     .overflow_hidden()
                     .bg(p.surface)
-                    .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().object_fit(ObjectFit::Cover))),
+                    .when_some(thumb, |d, t| d.child(img(SharedString::from(t)).size_full().rounded(radius).object_fit(ObjectFit::Cover))),
             )
-            .child(div().text_2xl().font_weight(FontWeight::BOLD).text_color(p.text).child(self.title.clone()))
+            .child(
+                selectable_text(
+                    "pl-title",
+                    if self.protected || (local_id.is_none() && self.info.is_none()) {
+                        t(&self.title).to_string()
+                    } else {
+                        self.title.clone()
+                    },
+                )
+                .text_2xl()
+                .font_weight(FontWeight::BOLD)
+                .text_color(p.text),
+            )
             .when_some(owner, |d, (name, cid)| {
                 d.child(
                     div()
@@ -232,8 +429,11 @@ impl Render for PlaylistPage {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(p.text)
                         .cursor_pointer()
-                        .child(name)
+                        .child(gpui_kit::base::SelectableText::new("pl-owner-name", if local_id.is_some() { t("You").to_string() } else { name }))
                         .on_click(move |_, window, cx| {
+                            if has_text_selection(window, cx) {
+                                return;
+                            }
                             if let Some(c) = cid.clone() {
                                 navigate(Route::Channel(c), window, cx)
                             }
@@ -242,9 +442,9 @@ impl Render for PlaylistPage {
             })
             .child({
                 let total: u64 = videos.iter().filter_map(|v| v.duration_secs).sum();
-                let count = self.count_text.clone().unwrap_or_else(|| format!("{} videos", videos.len()));
-                let dur = if total >= 3600 { format!("{} h {} min", total / 3600, (total % 3600) / 60) } else if total > 0 { format!("{} min", total / 60) } else { String::new() };
-                div().flex().gap_2().text_xs().text_color(p.text2).child(count).when(!dur.is_empty(), |d| d.child("•").child(dur))
+                let count = self.count_text.clone().unwrap_or_else(|| tf!("{0} videos", videos.len()));
+                let dur = if total >= 3600 { tf!("{0} h {1} min", total / 3600, (total % 3600) / 60) } else if total > 0 { tf!("{0} min", total / 60) } else { String::new() };
+                selectable_text("pl-meta", if dur.is_empty() { count } else { format!("{count}, {dur}") }).text_xs().text_color(p.text2)
             })
             .child(
                 div()
@@ -267,6 +467,9 @@ impl Render for PlaylistPage {
                                 cx.refresh_windows();
                             }),
                         )
+                    })
+                    .when(self.is_watch_later(), |d| {
+                        d.child(pill("pl-rm-watched", Some("list-x"), "Remove watched", cx).on_click(cx.listener(|this, _, window, cx| this.remove_watched(window, cx))))
                     })
                     .when_some(local_id.filter(|_| !self.protected), |d, id| {
                         d.child(icon_button("pl-rename", "pencil", cx).bg(p.chip).on_click(cx.listener(move |_, _, window, cx| {
@@ -323,43 +526,52 @@ impl Render for PlaylistPage {
                     );
                 }
                 for (k, label) in [(0u8, "Default"), (1, "Title"), (2, "Longest"), (3, "Shortest"), (4, "Channel")] {
-                    bar = bar.child(chip(SharedString::from(format!("pl-sort-{k}")), label, sort == k, cx).on_click(cx.listener(move |this, _, _, cx| {
+                    bar = bar.child(chip(SharedString::from(format!("pl-sort-{k}")), t(label), sort == k, cx).on_click(cx.listener(move |this, _, _, cx| {
                         this.sort = k;
                         cx.notify();
                     })));
                 }
                 let mut col = div().flex().flex_col().gap_1().flex_1().min_w_0().child(bar);
                 if shown.is_empty() {
-                    col = col.child(div().py_8().text_sm().text_color(p.text2).child("No videos match"));
+                    col = col.child(div().py_8().text_sm().text_color(p.text2).child(t("No videos match")));
                 }
                 let vs = &shown;
+                // a list of the user's own: local, or an account playlist the account can edit
+                // (its Favorites can be public, so it may not have been loaded through the account)
+                let account_favorites = matches!(&self.source, Source::Remote(id) if crate::ui::app::account_favorites_id(cx).as_ref() == Some(id));
+                let editable = local_id.is_some() || self.authed || account_favorites;
+                // saving to the list being shown makes no sense, so removing takes its place
+                let in_watch_later = self.is_watch_later();
                 for (i, v) in vs.iter().map(|(i, v)| (*i, v)) {
-                    let vid = v.id.clone();
+                    let extra = if editable {
+                        let (page, rid) = (cx.entity().downgrade(), v.id.clone());
+                        let label = if in_watch_later { "Remove from Watch later" } else { "Remove from playlist" };
+                        MenuExtra {
+                            items: vec![crate::ui::app::MenuItem::new("list-x", t(label), move |_, cx| {
+                                let _ = page.update(cx, |this, cx| this.remove_video(rid.clone(), cx));
+                            })],
+                            replaces_watch_later: in_watch_later,
+                        }
+                    } else {
+                        MenuExtra::default()
+                    };
                     let row = div()
                         .flex()
                         .items_center()
                         .gap_2()
                         .child(div().w_6().text_sm().text_color(p.text2).text_center().child((i + 1).to_string()))
-                        .child(div().flex_1().min_w_0().child(compact_row(
+                        .child(div().flex_1().min_w_0().child(compact_row_with(
                             v,
                             false,
                             Some({
                                 let entity = cx.entity().downgrade();
                                 Arc::new(move |window: &mut Window, cx: &mut App| {
                                     if let Some(e) = entity.upgrade() {
-                                        let page = e.read(cx);
-                                        // play from this index keeping the playlist as queue
-                                        let videos = page.videos.ready().cloned().unwrap_or_default();
-                                        let param = page.playlist_param();
-                                        player(cx).update(cx, |p, _| {
-                                            p.queue = videos;
-                                            p.queue_pos = Some(i);
-                                        });
-                                        let id = vid.clone();
-                                        navigate(Route::Watch { id, playlist: Some(param), start: None }, window, cx);
+                                        e.update(cx, |page, cx| page.play(false, i, window, cx));
                                     }
                                 })
                             }),
+                            extra,
                             cx,
                         )))
                         .when_some(local_id, |d, lid| {

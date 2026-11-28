@@ -10,14 +10,15 @@ const token = "a".repeat(43);
 
 async function run({
     granted = true, url = "https://www.youtube.com/", cookies = [], challenge = true,
+    purpose = "history-and-reactions",
     stores = [{ id: "another-profile", tabIds: [3] }, { id: "test-profile", tabIds: [5] }],
 } = {}) {
-    let click;
     let queried;
     let message;
     let nativeConnections = 0;
     let receiveRequest;
-    const button = { addEventListener: (_, listener) => { click = listener; } };
+    let connect;
+    const button = { addEventListener: (_, listener) => { connect = listener; } };
     const status = { textContent: "" };
     const context = {
         document: { getElementById: (id) => id === "connect" ? button : status },
@@ -47,7 +48,7 @@ async function run({
                         onMessage: {
                             addListener(listener) {
                                 if (challenge) {
-                                    listener({ name: "watch-history-request", userInfo: { port: "4000", token } });
+                                    listener({ name: "watch-history-request", userInfo: { port: "4000", token, purpose } });
                                 }
                             },
                         },
@@ -59,7 +60,7 @@ async function run({
     };
     vm.runInNewContext(background, context);
     vm.runInNewContext(popup, context);
-    await click();
+    await connect();
     return { status: status.textContent, queried, message, nativeConnections };
 }
 
@@ -85,6 +86,7 @@ test("sends only eligible cookies after receiving a request from Stream Tube", a
     assert.equal(result.queried.url, "https://www.youtube.com/");
     assert.equal(result.queried.storeId, "test-profile");
     assert.equal(result.message.token, token);
+    assert.equal(result.message.purpose, "history-and-reactions");
     assert.deepEqual(Array.from(result.message.cookies, ({ name }) => name), ["SID", "SAPISID"]);
     assert.match(result.status, /Session sent/);
 
@@ -103,4 +105,12 @@ test("a cookie store from another Safari profile cannot supply the session", asy
     assert.equal(result.queried, undefined);
     assert.equal(result.nativeConnections, 0);
     assert.match(result.status, /find the cookie store for this YouTube tab/);
+});
+
+test("the shared connection does not send the session to an older prototype", async () => {
+    for (const purpose of [null, "watch-history", "comment-reactions", "all-account-access"]) {
+        const result = await run({ cookies: signedIn, purpose });
+        assert.equal(result.message, undefined);
+        assert.match(result.status, /matching Stream Tube build/);
+    }
 });

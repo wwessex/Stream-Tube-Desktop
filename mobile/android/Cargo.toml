@@ -1,0 +1,35 @@
+[package]
+name = "stream-tube-android"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[lib]
+name = "stream_tube_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+rustferry = { version = "=0.1.0", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11.1"
+slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2"] }
+sys-locale = "0.3.2"
+ureq = "3.4.0"
+url = "2.5"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
+slint = { version = "=1.17.1", default-features = false, features = ["backend-android-activity-06", "renderer-skia"] }
+
+[build-dependencies]
+android-build = "0.1.4"
+slint-build = "=1.17.1"
+
+[lints.rust]
+unsafe_code = "deny"

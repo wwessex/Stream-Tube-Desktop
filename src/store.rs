@@ -1,5 +1,6 @@
 //! Persistent storage: settings (JSON) + SQLite for subscriptions, history, playlists, caches.
 use crate::api::types::VideoItem;
+use crate::i18n::AppLanguage;
 use anyhow::Result;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -7,18 +8,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub const DEFAULT_UP_NEXT_THUMBNAIL_WIDTH: u32 = 168;
+pub const UP_NEXT_THUMBNAIL_SIZES: &[(u32, &str)] = &[(128, "Small"), (DEFAULT_UP_NEXT_THUMBNAIL_WIDTH, "Medium"), (208, "Large")];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     // Appearance
     pub theme: String,
+    pub app_language: AppLanguage,
     pub accent: u32,
     pub start_page: String,
+    pub minimize_to_tray: bool,
     pub grid_columns: u32,
+    pub up_next_thumbnail_width: u32,
     // Region
     pub region: String,
     pub language: String,
+    pub original_video_titles: bool,
     // Backend
     pub stream_backend: String,
     /// Linux: "auto", "x11" or "wayland" (see display.rs)
@@ -26,6 +35,9 @@ pub struct Settings {
     pub ytdlp_path: String,
     pub proxy: String,
     // Player
+    pub theater_mode: bool,
+    pub theater_full_height: bool,
+    pub pip_always_on_top: bool,
     pub default_quality: u32,
     pub codec_pref: String,
     pub default_speed: f64,
@@ -57,6 +69,7 @@ pub struct Settings {
     pub hide_related: bool,
     pub hide_watched_in_feed: bool,
     pub hide_view_counts: bool,
+    pub hide_subscriber_counts: bool,
     pub hide_description: bool,
     pub hide_channel_avatars: bool,
     pub hide_chapters: bool,
@@ -64,6 +77,8 @@ pub struct Settings {
     pub blocked_keywords: Vec<String>,
     /// (channel_id, name)
     pub blocked_channels: Vec<(String, String)>,
+    /// (video_id, title) hidden via "Not interested"
+    pub hidden_videos: Vec<(String, String)>,
     // Privacy
     pub history_enabled: bool,
     pub search_history_enabled: bool,
@@ -78,6 +93,8 @@ pub struct Settings {
     /// The user picked (or accepted) the download folder; until then the first download asks.
     pub download_dir_chosen: bool,
     pub download_format: String,
+    /// File name for downloads, with {title}, {channel} and {id}; empty is "{title} [{id}]"
+    pub download_name: String,
     pub external_player: String,
     // appearance / player customization
     pub ui_scale: f32,
@@ -108,10 +125,16 @@ pub struct Settings {
     /// "confirm you're not a bot" wall while IPv4 from the same line doesn't.
     pub ipv4_only: bool,
     pub background_play: bool,
+    pub independent_tab_playback: bool,
     // Tweaks (from YouTube patch sets like Morphe/ReVanced)
     pub ambient_mode: bool,
     pub shorts_in_player: bool,
     pub shorts_autoadvance: bool,
+    pub shorts_preload: u8,
+    pub shorts_yt_layout: bool,
+    pub shorts_edge_nav: bool,
+    pub shorts_show_subscribe: bool,
+    pub shorts_show_dislike: bool,
     pub remember_quality: bool,
     pub exit_fullscreen_at_end: bool,
     /// "light" | "default" | "strong": gradient behind the player controls
@@ -122,8 +145,18 @@ pub struct Settings {
     pub hover_preview: bool,
     /// show archived annotations (notes and links YouTube removed in 2019)
     pub annotations: bool,
+    /// crop or zoom of the picture, a value of `player::aspect::MODES` ("original", "auto", "21:9"...)
+    pub aspect_mode: String,
     /// keep page scrollbars on screen instead of showing them on hover
     pub always_scrollbars: bool,
+    /// show the video title in the upper-left corner of the player when controls are visible
+    pub show_player_title: bool,
+    /// group subscriptions feed videos into day buckets (Today, Yesterday, ...)
+    pub feed_group_by_day: bool,
+    /// audio equalizer preset ("flat", "bass", "voice", "treble", "warm")
+    pub eq_preset: String,
+    /// keep the tab bar visible even when only one tab is open
+    pub always_show_tab_bar: bool,
 }
 
 impl Default for Settings {
@@ -139,15 +172,22 @@ impl Default for Settings {
         }
         Self {
             theme: "dark".into(),
+            app_language: AppLanguage::default(),
             accent: 0xff0033,
             start_page: "home".into(),
+            minimize_to_tray: false,
             grid_columns: 0,
+            up_next_thumbnail_width: DEFAULT_UP_NEXT_THUMBNAIL_WIDTH,
             region: "US".into(),
             language: "en".into(),
+            original_video_titles: false,
             stream_backend: "auto".into(),
             display_server: "auto".into(),
             ytdlp_path: String::new(),
             proxy: String::new(),
+            theater_mode: false,
+            theater_full_height: false,
+            pip_always_on_top: false,
             default_quality: 1080,
             codec_pref: "vp9".into(),
             default_speed: 1.0,
@@ -167,6 +207,7 @@ impl Default for Settings {
             sb_min_duration: 0.0,
             sb_notify: true,
             annotations: true,
+            aspect_mode: "original".into(),
             always_scrollbars: false,
             dearrow_titles: false,
             dearrow_thumbnails: false,
@@ -178,23 +219,30 @@ impl Default for Settings {
             hide_related: false,
             hide_watched_in_feed: false,
             hide_view_counts: false,
+            hide_subscriber_counts: false,
             hide_description: false,
             hide_channel_avatars: false,
             hide_chapters: false,
             hide_explore: false,
             blocked_keywords: Vec::new(),
             blocked_channels: Vec::new(),
+            hidden_videos: Vec::new(),
             history_enabled: true,
             search_history_enabled: true,
             check_updates: true,
             feed_source: "full".into(),
             feed_include_shorts: false,
             feed_include_live: true,
+            feed_group_by_day: true,
+            show_player_title: false,
+            eq_preset: "flat".into(),
+            always_show_tab_bar: false,
             download_dir: dirs::download_dir()
                 .map(|d| d.join("Stream Tube").to_string_lossy().into_owned())
                 .unwrap_or_default(),
             download_dir_chosen: false,
             download_format: "1080".into(),
+            download_name: String::new(),
             external_player: String::new(),
             ui_scale: 1.0,
             density: "default".into(),
@@ -215,9 +263,15 @@ impl Default for Settings {
             enhanced_bitrate: false,
             ipv4_only: true,
             background_play: true,
+            independent_tab_playback: false,
             ambient_mode: true,
             shorts_in_player: false,
             shorts_autoadvance: false,
+            shorts_preload: 1,
+            shorts_yt_layout: false,
+            shorts_edge_nav: true,
+            shorts_show_subscribe: true,
+            shorts_show_dislike: true,
             remember_quality: false,
             exit_fullscreen_at_end: true,
             controls_shade: "default".into(),
@@ -298,6 +352,9 @@ fn write_settings_file(s: &Settings) -> Result<()> {
 }
 
 fn normalize_settings(s: &mut Settings) {
+    if !UP_NEXT_THUMBNAIL_SIZES.iter().any(|&(width, _)| width == s.up_next_thumbnail_width) {
+        s.up_next_thumbnail_width = DEFAULT_UP_NEXT_THUMBNAIL_WIDTH;
+    }
     const LADDER: [u32; 7] = [144, 240, 360, 480, 720, 1080, 1440];
     if s.default_quality != 2160 && s.default_quality != 4320 && !LADDER.contains(&s.default_quality) {
         s.default_quality = LADDER.iter().copied().filter(|l| *l <= s.default_quality.max(144)).max().unwrap_or(1080);
@@ -315,6 +372,13 @@ pub fn settings_snapshot() -> Arc<Settings> {
     settings_lock().read().clone()
 }
 
+static HISTORY_RECORDING_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn history_recording_revision() -> Option<u64> {
+    let settings = settings_lock().read();
+    settings.history_enabled.then(|| HISTORY_RECORDING_REVISION.load(Ordering::Relaxed))
+}
+
 pub fn update_settings(f: impl FnOnce(&mut Settings)) {
     // one writer at a time, so two quick changes from different threads
     // can't both start from the same old copy and drop one of them
@@ -324,11 +388,11 @@ pub fn update_settings(f: impl FnOnce(&mut Settings)) {
     f(&mut s);
     let _ = write_settings_file(&s);
     let _ = save_setting_json("settings", &s);
-    *settings_lock().write() = Arc::new(s);
-}
-
-pub fn ip_family() -> ureq::config::IpFamily {
-    if settings_snapshot().ipv4_only { ureq::config::IpFamily::Ipv4Only } else { ureq::config::IpFamily::Any }
+    let mut current = settings_lock().write();
+    if current.history_enabled != s.history_enabled {
+        HISTORY_RECORDING_REVISION.fetch_add(1, Ordering::Relaxed);
+    }
+    *current = Arc::new(s);
 }
 
 /// Whether mpv can use this proxy itself (it only speaks HTTP proxies).
@@ -342,6 +406,25 @@ pub fn proxy_setting() -> Option<String> {
     (!p.trim().is_empty()).then_some(p)
 }
 
+/// The profile holds the sign-in (OAuth tokens and Google cookies), so on Linux and
+/// macOS only its owner may open it: the folder is 0700 and the files already in it
+/// 0600. Windows keeps %APPDATA% per user already.
+#[cfg(unix)]
+fn make_private(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = std::fs::set_permissions(e.path(), std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn make_private(_dir: &std::path::Path) {}
+
 pub fn data_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -349,6 +432,7 @@ pub fn data_dir() -> PathBuf {
         if let Some(d) = std::env::var_os("STREAMTUBE_DATA_DIR").filter(|d| !d.is_empty()) {
             let d = PathBuf::from(d);
             let _ = std::fs::create_dir_all(&d);
+            make_private(&d);
             return d;
         }
         // tests never touch the real profile
@@ -360,16 +444,17 @@ pub fn data_dir() -> PathBuf {
         }
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
         #[cfg(target_os = "macos")]
-        let safari_prototype = crate::api::safari::available();
+        let safari_profile = crate::api::safari::profile_name();
         #[cfg(not(target_os = "macos"))]
-        let safari_prototype = false;
-        let d = base.join(if safari_prototype { "StreamTube Safari Prototype" } else { "StreamTube" });
+        let safari_profile: Option<String> = None;
+        let d = base.join(safari_profile.as_deref().unwrap_or("StreamTube"));
         // Carry over data from the regular app's previous name.
         let old = base.join("Ferrotube");
-        if !safari_prototype && !d.exists() && old.exists() {
+        if safari_profile.is_none() && !d.exists() && old.exists() {
             let _ = std::fs::rename(&old, &d);
         }
         let _ = std::fs::create_dir_all(&d);
+        make_private(&d);
         // A -wal/-shm left without its database belongs to some other copy of it;
         // SQLite would replay it onto whatever database is put there next and
         // damage it, so drop it before anything opens the database.
@@ -392,6 +477,7 @@ const TABLES: &str = "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value
      CREATE TABLE IF NOT EXISTS profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color INTEGER NOT NULL);
      CREATE TABLE IF NOT EXISTS profile_channels (profile_id INTEGER NOT NULL, channel_id TEXT NOT NULL, PRIMARY KEY(profile_id, channel_id));
      CREATE TABLE IF NOT EXISTS history (video_id TEXT PRIMARY KEY, json TEXT NOT NULL, watched_at INTEGER NOT NULL, progress REAL NOT NULL DEFAULT 0, duration REAL NOT NULL DEFAULT 0);
+     CREATE TABLE IF NOT EXISTS history_sync (video_id TEXT PRIMARY KEY, account TEXT, remote_progress REAL, local_updated_at INTEGER NOT NULL DEFAULT 0, removed INTEGER NOT NULL DEFAULT 0);
      CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at INTEGER NOT NULL, protected INTEGER NOT NULL DEFAULT 0, yt_id TEXT);
      CREATE TABLE IF NOT EXISTS playlist_items (playlist_id INTEGER NOT NULL, video_id TEXT NOT NULL, json TEXT NOT NULL, added_at INTEGER NOT NULL, position INTEGER NOT NULL, PRIMARY KEY(playlist_id, video_id));
      CREATE TABLE IF NOT EXISTS search_history (query TEXT PRIMARY KEY, at INTEGER NOT NULL);
@@ -404,33 +490,68 @@ const TABLES: &str = "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value
 /// every row that can still be read, and the damaged file is kept beside it.
 fn open_checked(path: &std::path::Path) -> Connection {
     let conn = Connection::open(path).expect("open db");
-    let ok = conn
-        .query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0))
-        .map(|r| r == "ok")
-        .unwrap_or(false);
-    if ok {
+    if !check_says_damaged(conn.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0))) {
+        return conn;
+    }
+    // Another copy of the app has the database open: moving the file away under it
+    // would split its writes from ours. Repair at the next start instead.
+    if crate::links::other_instance_running() {
+        eprintln!("streamtube: the database failed its check; it is repaired when no other copy is running");
         return conn;
     }
     eprintln!("streamtube: the database failed its check, rebuilding it");
     let fresh = path.with_extension("db.rebuild");
     let _ = std::fs::remove_file(&fresh);
-    if rebuild_into(&conn, &fresh).is_err() {
+    if let Err(e) = rebuild_into(&conn, &fresh) {
+        eprintln!("streamtube: couldn't rebuild the database: {e}");
         let _ = std::fs::remove_file(&fresh);
         return conn;
     }
     drop(conn);
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let damaged = path.with_extension(format!("db.damaged-{stamp}"));
+    let side = |base: &std::path::Path, ext: &str| PathBuf::from(format!("{}{ext}", base.display()));
+    let reopen = |why: &str| {
+        eprintln!("streamtube: {why}; keeping the database as it is");
+        Connection::open(path).expect("open db")
+    };
     if std::fs::rename(path, &damaged).is_err() {
         let _ = std::fs::remove_file(&fresh);
-        return Connection::open(path).expect("open db");
+        return reopen("couldn't move the damaged database aside");
     }
+    // A -wal left in place would be replayed onto the rebuilt database and damage it.
     for ext in ["-wal", "-shm"] {
-        let from = PathBuf::from(format!("{}{ext}", path.display()));
-        let _ = std::fs::rename(&from, PathBuf::from(format!("{}{ext}", damaged.display())));
+        let from = side(path, ext);
+        if from.exists() && std::fs::rename(&from, side(&damaged, ext)).is_err() {
+            for back in ["-wal", "-shm"] {
+                let _ = std::fs::rename(side(&damaged, back), side(path, back));
+            }
+            let _ = std::fs::rename(&damaged, path);
+            let _ = std::fs::remove_file(&fresh);
+            return reopen("couldn't move the damaged database's journal aside");
+        }
     }
-    let _ = std::fs::rename(&fresh, path);
+    if std::fs::rename(&fresh, path).is_err() {
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::rename(side(&damaged, ext), side(path, ext));
+        }
+        let _ = std::fs::rename(&damaged, path);
+        let _ = std::fs::remove_file(&fresh);
+        return reopen("couldn't put the rebuilt database in place");
+    }
     Connection::open(path).expect("open db")
+}
+
+/// Whether the result of `PRAGMA quick_check` means the file is damaged. A check
+/// that couldn't run (the database is busy or locked by another copy) says nothing.
+fn check_says_damaged(result: rusqlite::Result<String>) -> bool {
+    match result {
+        Ok(r) => r != "ok",
+        Err(rusqlite::Error::SqliteFailure(e, _)) => {
+            matches!(e.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        }
+        Err(_) => false,
+    }
 }
 
 fn rebuild_into(old: &Connection, fresh: &std::path::Path) -> Result<()> {
@@ -490,7 +611,9 @@ fn db() -> &'static Mutex<Connection> {
     static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
     DB.get_or_init(|| {
         let conn = open_checked(&data_dir().join("streamtube.db"));
-        conn.execute_batch(&format!("PRAGMA journal_mode=WAL; {TABLES}"))
+        // WAL mode is crash-safe with synchronous=NORMAL and avoids an fsync
+        // on every 5-second playback progress save.
+        conn.execute_batch(&format!("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; {TABLES}"))
         .expect("init db");
         // built-in playlists
         let n: i64 = conn
@@ -526,6 +649,18 @@ fn save_setting_json<T: Serialize>(key: &str, v: &T) -> Result<()> {
         params![key, serde_json::to_string(v)?],
     )?;
     Ok(())
+}
+
+/// Moves on every write that can change what the sidebar lists (subscriptions,
+/// playlists), so readers can cache those queries.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn generation() -> u64 {
+    GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn bump_generation() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn kv_get(key: &str) -> Option<String> {
@@ -571,6 +706,7 @@ pub fn subscribe(channel_id: &str, name: &str, avatar: Option<&str>) {
          ON CONFLICT(channel_id) DO UPDATE SET name=excluded.name, avatar=COALESCE(excluded.avatar, avatar)",
         params![channel_id, name, avatar, crate::api::json::now()],
     );
+    bump_generation();
 }
 
 pub fn unsubscribe(channel_id: &str) {
@@ -578,6 +714,7 @@ pub fn unsubscribe(channel_id: &str) {
     let _ = conn.execute("DELETE FROM subscriptions WHERE channel_id=?1", [channel_id]);
     let _ = conn.execute("DELETE FROM profile_channels WHERE channel_id=?1", [channel_id]);
     let _ = conn.execute("DELETE FROM feed_cache WHERE channel_id=?1", [channel_id]);
+    bump_generation();
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -662,23 +799,78 @@ pub fn history_add(v: &VideoItem) {
     if !settings_snapshot().history_enabled {
         return;
     }
-    if let Ok(j) = serde_json::to_string(v) {
-        let _ = db().lock().execute(
+    let result = (|| -> Result<()> {
+        let j = serde_json::to_string(v)?;
+        let mut conn = db().lock();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO history(video_id, json, watched_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(video_id) DO UPDATE SET json=excluded.json, watched_at=excluded.watched_at",
             params![v.id, j, crate::api::json::now()],
-        );
+        )?;
+        tx.execute("UPDATE history_sync SET removed=0 WHERE video_id=?1 AND removed<>0", [&v.id])?;
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("streamtube: could not save watch history: {error}");
     }
 }
 
 pub fn history_progress(video_id: &str, progress: f64, duration: f64) {
-    if !settings_snapshot().history_enabled {
+    if !settings_snapshot().history_enabled || !progress.is_finite() || progress < 0.0 || !duration.is_finite() || duration < 0.0 {
         return;
     }
-    let _ = db().lock().execute(
-        "UPDATE history SET progress=?2, duration=?3 WHERE video_id=?1",
-        params![video_id, progress, duration],
-    );
+    let result = (|| -> Result<()> {
+        let mut conn = db().lock();
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE history SET progress=?2, duration=?3
+             WHERE video_id=?1 AND (progress<>?2 OR duration<>?3)",
+            params![video_id, progress, duration],
+        )?;
+        if updated > 0 {
+            tx.execute(
+                "INSERT INTO history_sync(video_id, local_updated_at) VALUES (?1, ?2)
+                 ON CONFLICT(video_id) DO UPDATE SET local_updated_at=excluded.local_updated_at",
+                params![video_id, chrono::Utc::now().timestamp_millis()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("streamtube: could not save playback position: {error}");
+    }
+}
+
+/// Like `history_progress`, on a background thread: the player saves progress every
+/// few seconds, and a slow disk must not stall the UI thread (it draws the video).
+/// Writes keep their order; with `wait`, this returns once the write (and every
+/// one queued before it) is done.
+pub fn history_progress_queued(video_id: &str, progress: f64, duration: f64, wait: bool) {
+    type Job = (String, f64, f64, Option<std::sync::mpsc::Sender<()>>);
+    static WORKER: OnceLock<Mutex<std::sync::mpsc::Sender<Job>>> = OnceLock::new();
+    let tx = WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        let _ = std::thread::Builder::new().name("history-progress".into()).spawn(move || {
+            for (id, p, d, done) in rx {
+                history_progress(&id, p, d);
+                if let Some(done) = done {
+                    let _ = done.send(());
+                }
+            }
+        });
+        Mutex::new(tx)
+    });
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    if tx.lock().send((video_id.to_string(), progress, duration, wait.then_some(done_tx))).is_err() {
+        history_progress(video_id, progress, duration);
+        return;
+    }
+    if wait {
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    }
 }
 
 pub fn history_list(query: &str, limit: usize) -> Vec<HistoryEntry> {
@@ -711,37 +903,213 @@ pub fn progress_map() -> HashMap<String, (f64, f64)> {
         .collect()
 }
 
-/// Merges an entry from the account's YouTube history: adds it when missing and keeps
-/// the furthest resume position. Local entries keep their own date and order.
-/// Returns true when the entry was new.
-pub fn history_merge_remote(v: &VideoItem, progress: f64, duration: f64, watched_at: i64) -> bool {
-    if !settings_snapshot().history_enabled {
-        return false;
+pub fn playback_position(video_id: &str) -> Option<(f64, f64)> {
+    db().lock().query_row(
+        "SELECT progress, duration FROM history WHERE video_id=?1",
+        [video_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).ok()
+}
+
+pub fn resume_position(video_id: &str) -> Option<f64> {
+    let (progress, duration) = playback_position(video_id)?;
+    (progress > 10.0 && (duration <= 0.0 || progress < duration - 15.0)).then_some(progress)
+}
+
+pub fn history_merge_remote(
+    account: u64,
+    entries: &[crate::api::history::Entry],
+    protected_video: Option<&str>,
+    requested_at: i64,
+    offset: usize,
+    recording_revision: u64,
+) -> Result<()> {
+    if history_recording_revision() != Some(recording_revision) {
+        return Ok(());
     }
-    let Ok(j) = serde_json::to_string(v) else { return false };
-    let conn = db().lock();
-    let existed = conn
-        .query_row("SELECT 1 FROM history WHERE video_id=?1", [&v.id], |_| Ok(()))
-        .optional()
-        .ok()
-        .flatten()
-        .is_some();
-    let _ = conn.execute(
-        "INSERT INTO history(video_id, json, watched_at, progress, duration) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(video_id) DO UPDATE SET
-           progress = CASE WHEN excluded.progress > history.progress THEN excluded.progress ELSE history.progress END,
-           duration = CASE WHEN history.duration > 0 THEN history.duration ELSE excluded.duration END",
-        params![v.id, j, watched_at, progress, duration],
-    );
-    !existed
+    merge_remote_history(&mut db().lock(), &account.to_string(), entries, protected_video, requested_at, offset)
+}
+
+fn merge_remote_history(
+    conn: &mut Connection,
+    account: &str,
+    entries: &[crate::api::history::Entry],
+    protected_video: Option<&str>,
+    requested_at: i64,
+    offset: usize,
+) -> Result<()> {
+    const LOCAL_GRACE_MS: i64 = 30_000;
+    let tx = conn.transaction()?;
+    {
+        let mut local = tx.prepare("SELECT progress FROM history WHERE video_id=?1")?;
+        let mut state = tx.prepare(
+            "SELECT account, remote_progress, local_updated_at, removed FROM history_sync WHERE video_id=?1",
+        )?;
+        let mut observe = tx.prepare(
+            "INSERT INTO history_sync(video_id, account, remote_progress, removed) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(video_id) DO UPDATE SET account=excluded.account,
+                 remote_progress=excluded.remote_progress, removed=excluded.removed",
+        )?;
+        let mut save = tx.prepare(
+            "INSERT INTO history(video_id, json, watched_at, progress, duration) VALUES (?1, ?2, ?3, COALESCE(?4, 0), ?5)
+             ON CONFLICT(video_id) DO UPDATE SET progress=COALESCE(?4, history.progress),
+                 duration=CASE WHEN history.duration > 0 THEN history.duration ELSE excluded.duration END",
+        )?;
+        for (index, entry) in entries.iter().enumerate() {
+            let id = entry.video.id.as_str();
+            if Some(id) == protected_video {
+                continue;
+            }
+            let (observed_account, previous_remote, local_at, removed): (Option<String>, Option<f64>, i64, bool) =
+                state.query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                    .optional()?.unwrap_or_default();
+            if local_at > requested_at.saturating_sub(LOCAL_GRACE_MS) {
+                continue;
+            }
+            let local_progress: Option<f64> = local.query_row([id], |row| row.get(0)).optional()?;
+            let previous_remote = previous_remote.filter(|_| observed_account.as_deref() == Some(account));
+            let remote_changed = entry.progress.zip(previous_remote)
+                .is_some_and(|(remote, previous)| (remote.seconds - previous).abs() >= remote.precision);
+            let still_removed = removed && !remote_changed;
+            let observation = entry.progress.map(|p| p.seconds).or(previous_remote);
+            observe.execute(params![id, account, observation, still_removed])?;
+            if still_removed {
+                continue;
+            }
+            let accepted = entry.progress.filter(|remote| {
+                // Without a prior server observation, its age is unknown. Keep
+                // meaningful local progress until the server position changes.
+                local_progress.is_none_or(|position| (position == 0.0 && local_at == 0 && previous_remote.is_none()) ||
+                    (remote_changed && (remote.seconds - position).abs() >= remote.precision))
+            });
+            let json = serde_json::to_string(&entry.video)?;
+            let duration = entry.video.duration_secs.unwrap_or(0) as f64;
+            // History responses are ordered but don't give a per-video date.
+            let watched_at = requested_at / 1000 - (offset + index) as i64;
+            save.execute(params![id, json, watched_at, accepted.map(|p| p.seconds), duration])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn history_remove(video_id: &str) {
-    let _ = db().lock().execute("DELETE FROM history WHERE video_id=?1", [video_id]);
+    if let Err(error) = try_history_remove(video_id) {
+        eprintln!("streamtube: could not remove watch history: {error}");
+    }
+}
+
+pub(crate) fn try_history_remove(video_id: &str) -> Result<()> {
+    let mut conn = db().lock();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO history_sync(video_id, local_updated_at, removed) VALUES (?1, ?2, 1)
+         ON CONFLICT(video_id) DO UPDATE SET removed=1, local_updated_at=excluded.local_updated_at",
+        params![video_id, chrono::Utc::now().timestamp_millis()],
+    )?;
+    tx.execute("DELETE FROM history WHERE video_id=?1", [video_id])?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn history_clear() {
-    let _ = db().lock().execute("DELETE FROM history", []);
+    let result = (|| -> Result<()> {
+        let mut conn = db().lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO history_sync(video_id, local_updated_at, removed)
+             SELECT video_id, ?1, 1 FROM history WHERE true
+             ON CONFLICT(video_id) DO UPDATE SET removed=1, local_updated_at=excluded.local_updated_at",
+            [chrono::Utc::now().timestamp_millis()],
+        )?;
+        tx.execute("DELETE FROM history", [])?;
+        tx.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("streamtube: could not clear watch history: {error}");
+    }
+}
+
+#[cfg(test)]
+mod history_merge_tests {
+    use super::*;
+    use crate::api::history::{Entry, Position};
+
+    const NOW: i64 = 1_700_000_000_000;
+    const VIDEO_ID: &str = "test-video";
+
+    fn entry(seconds: Option<f64>) -> Entry {
+        Entry {
+            video: VideoItem { id: VIDEO_ID.into(), duration_secs: Some(600), ..Default::default() },
+            progress: seconds.map(|seconds| Position { seconds, precision: 1.0 }),
+            removal_token: None,
+        }
+    }
+
+    fn progress(conn: &Connection) -> Option<f64> {
+        conn.query_row("SELECT progress FROM history WHERE video_id=?1", [VIDEO_ID], |row| row.get(0))
+            .optional().unwrap()
+    }
+
+    #[test]
+    fn uses_a_changed_remote_position_even_when_it_moves_backwards() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        merge_remote_history(&mut conn, "web", &[entry(None)], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(80.0));
+    }
+
+    #[test]
+    fn first_observation_and_in_flight_refresh_keep_local_progress() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        conn.execute("INSERT INTO history VALUES (?1, '{}', 123, 300, 600)", [VIDEO_ID]).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(450.0))], None, NOW, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        conn.execute("UPDATE history_sync SET local_updated_at=?1 WHERE video_id=?2", params![NOW + 61_000, VIDEO_ID]).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], Some(VIDEO_ID), NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(80.0));
+    }
+
+    #[test]
+    fn an_unchanged_remote_entry_does_not_reappear_after_local_removal() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW, 0).unwrap();
+        conn.execute("DELETE FROM history", []).unwrap();
+        conn.execute("UPDATE history_sync SET removed=1", []).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), None);
+
+        merge_remote_history(&mut conn, "web", &[entry(Some(80.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(80.0));
+    }
+
+    #[test]
+    fn does_not_treat_a_different_account_as_a_new_view_or_overwrite_a_local_replay() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        merge_remote_history(&mut conn, "web", &[entry(Some(300.0))], None, NOW, 0).unwrap();
+        merge_remote_history(&mut conn, "another-account", &[entry(Some(450.0))], None, NOW + 60_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(300.0));
+        conn.execute("UPDATE history SET progress=0 WHERE video_id=?1", [VIDEO_ID]).unwrap();
+        conn.execute("UPDATE history_sync SET local_updated_at=?1 WHERE video_id=?2", params![NOW + 65_000, VIDEO_ID]).unwrap();
+        merge_remote_history(&mut conn, "another-account", &[entry(Some(450.0))], None, NOW + 120_000, 0).unwrap();
+        assert_eq!(progress(&conn), Some(0.0));
+    }
 }
 
 // ───────────────────────── search history ─────────────────────────
@@ -825,17 +1193,21 @@ pub fn playlist_create(name: &str) -> i64 {
         "INSERT INTO playlists(name, created_at) VALUES (?1, ?2)",
         params![name, crate::api::json::now()],
     );
-    conn.last_insert_rowid()
+    let id = conn.last_insert_rowid();
+    bump_generation();
+    id
 }
 
 pub fn playlist_rename(id: i64, name: &str) {
     let _ = db().lock().execute("UPDATE playlists SET name=?2 WHERE id=?1", params![id, name]);
+    bump_generation();
 }
 
 pub fn playlist_delete(id: i64) {
     let conn = db().lock();
     let _ = conn.execute("DELETE FROM playlists WHERE id=?1 AND protected=0", [id]);
     let _ = conn.execute("DELETE FROM playlist_items WHERE playlist_id=?1", [id]);
+    bump_generation();
 }
 
 pub fn playlist_items(id: i64) -> Vec<VideoItem> {
@@ -971,6 +1343,9 @@ pub fn is_filtered(v: &VideoItem, s: &Settings) -> bool {
     if s.hide_upcoming && v.is_upcoming {
         return true;
     }
+    if s.hidden_videos.iter().any(|(id, _)| id == &v.id) {
+        return true;
+    }
     if let Some(cid) = &v.channel_id {
         if s.blocked_channels.iter().any(|(id, _)| id == cid) {
             return true;
@@ -997,6 +1372,19 @@ pub fn set_rating(video_id: &str, r: i8) {
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+
+    #[test]
+    fn theater_settings_round_trip_and_default_to_off() {
+        let old = settings_from_value(serde_json::json!({}));
+        assert!(!old.theater_mode);
+        assert!(!old.theater_full_height);
+
+        let enabled = Settings { theater_mode: true, theater_full_height: true, ..old };
+        let saved = serde_json::to_value(enabled).unwrap();
+        let restored = settings_from_value(saved);
+        assert!(restored.theater_mode);
+        assert!(restored.theater_full_height);
+    }
 
     #[test]
     fn a_bad_field_keeps_the_others() {
@@ -1046,5 +1434,83 @@ mod settings_tests {
         assert!(damaged, "the damaged file is kept");
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_check_that_could_not_run_is_not_damage() {
+        let fail = |code| Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None));
+        assert!(!check_says_damaged(Ok("ok".into())));
+        assert!(check_says_damaged(Ok("*** in database main ***".into())));
+        assert!(check_says_damaged(fail(rusqlite::ffi::SQLITE_CORRUPT)));
+        assert!(check_says_damaged(fail(rusqlite::ffi::SQLITE_NOTADB)));
+        assert!(!check_says_damaged(fail(rusqlite::ffi::SQLITE_BUSY)));
+        assert!(!check_says_damaged(fail(rusqlite::ffi::SQLITE_LOCKED)));
+    }
+
+    /// A damaged database left with its -wal (the app was closed mid-session): the
+    /// rebuilt file must not get the old journal replayed onto it.
+    #[test]
+    fn damaged_database_with_its_journal_is_rebuilt() {
+        let dir = std::env::temp_dir().join(format!("st-rebuild-wal-{}", std::process::id()));
+        let live = dir.join("live");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&live).unwrap();
+        let path = dir.join("streamtube.db");
+        {
+            let c = Connection::open(live.join("streamtube.db")).unwrap();
+            c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
+            c.execute_batch(TABLES).unwrap();
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+            for i in 0..300 {
+                c.execute("INSERT INTO kv VALUES (?1, ?2)", params![format!("k{i}"), "x".repeat(200)]).unwrap();
+            }
+            c.execute_batch("PRAGMA wal_checkpoint(PASSIVE)").unwrap();
+            for i in 0..50 {
+                c.execute("INSERT INTO history(video_id, json, watched_at) VALUES (?1, '{}', ?2)", params![format!("v{i}"), i]).unwrap();
+            }
+            // copy the files as they are on disk while the connection still has them open
+            for ext in ["", "-wal"] {
+                std::fs::copy(live.join(format!("streamtube.db{ext}")), dir.join(format!("streamtube.db{ext}"))).unwrap();
+            }
+        }
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(4096 * 6)).unwrap();
+            f.write_all(&[0xAB; 64]).unwrap();
+        }
+        assert!(dir.join("streamtube.db-wal").exists());
+        let c = open_checked(&path);
+        let ok: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(ok, "ok");
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 50, "rows that were only in the journal are kept");
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().any(|n| n.contains("damaged")), "the damaged file is kept: {names:?}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod progress_queue_tests {
+    use super::*;
+
+    #[test]
+    fn queued_progress_writes_land_in_order() {
+        let v = crate::api::types::VideoItem { id: "queued-progress".into(), ..Default::default() };
+        history_add(&v);
+        for i in 1..=50 {
+            history_progress_queued(&v.id, i as f64, 100.0, false);
+        }
+        history_progress_queued(&v.id, 77.0, 100.0, true);
+        // `wait` gives up after 5 s so shutdown can't hang; on a busy CI runner other
+        // tests can hold the database longer than that, so give the worker more time here
+        let read = || history_list("", 500).into_iter().find(|h| h.video.id == v.id).map(|h| h.progress);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while read() != Some(77.0) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(read(), Some(77.0));
     }
 }

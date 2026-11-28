@@ -1,6 +1,6 @@
 [package]
 name = "streamtube"
-version = "0.7.2-alpha"
+version = "1.0.0"
 edition = "2024"
 description = "A YouTube desktop client in Rust + GPUI with SponsorBlock, DeArrow, RYD, local subscriptions & more"
 license = "MIT"
@@ -11,27 +11,51 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "3", features = ["json", "socks-proxy"] }
+url = "2"
 rusqlite = { version = "0.43", features = ["bundled"] }
 parking_lot = "0.12"
 sha2 = "0.11"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 dirs = "6"
+if-addrs = { version = "0.15", features = ["link-local"] }
 libloading = "0.9"
 image = { version = "0.25", default-features = false }
 futures = "0.3"
 smallvec = "1"
+unicode-linebreak = "0.1"
+unicode-segmentation = "1"
 rand = "0.9"
 open = "5"
 raw-window-handle = "0.6"
 sha1 = "0.11"
-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+# QuickJS, to solve the JavaScript challenges in YouTube stream URLs when no
+# Deno or Node.js is installed; see src/api/jsc.rs
+rquickjs = "0.14"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# already in the tree through GPUI's Windows backend
+windows = { version = "0.62", features = ["Foundation", "Media", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# already in the tree through GPUI (ashpd); MPRIS for the desktop's media widget, see src/mpris.rs
+zbus = { version = "5", default-features = false, features = ["async-io"] }
+wayland-client = { version = "0.31", features = ["system", "dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Compile GPUI shaders at launch so the app can build with Command Line Tools.
+gpui-pre-macos = { version = "=0.3.12", default-features = false, features = ["runtime_shaders"] }
 libc = "0.2"
+# also hides the pointer with the player controls
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSDictionary", "NSObject", "NSString"] }
+# block2 and the NSData/NSGeometry/NSValue parts are also for Now Playing in Control Center
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSValue"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
+# GPU video path (src/player/gl_macos.rs): the pixel buffer type GPUI's surface() takes
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBuffer", "CVImageBuffer", "CVPixelBuffer"] }
 
 [profile.dev.package."*"]
 opt-level = 2
@@ -51,6 +75,10 @@ embed-resource = "3"
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 
 # GPUI's Windows text backend with one fix: right-to-left text (Arabic, Hebrew)
-# was drawn mirrored. See vendor/gpui-pre-windows/PATCHES.md.
+# needs visual glyph ordering. See vendor/gpui-pre-windows/PATCHES.md.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# xim-ctext 0.3 with a decoder that handles non-UTF-8 compound text such as
+# Cyrillic, which made typing in some Linux input methods crash the app (#248).
+# See vendor/xim-ctext/Cargo.toml.
+xim-ctext = { path = "vendor/xim-ctext" }

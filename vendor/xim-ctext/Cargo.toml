@@ -1,0 +1,20 @@
+# Patched copy of xim-ctext 0.3.0 (MIT, Riey, https://github.com/Riey/xim-rs) used
+# through [patch.crates-io]: GPUI's XIM client only accepts xim-ctext 0.3, whose
+# decoder fails on non-UTF-8 compound text such as Cyrillic, and the client
+# panics on that error (issue #248). Only `compound_text_to_utf8` is changed.
+[package]
+edition = "2018"
+name = "xim-ctext"
+version = "0.3.1"
+authors = ["Riey <creeper844@gmail.com>"]
+description = "compound text en/decoder"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/Riey/xim-rs"
+
+[dependencies]
+encoding_rs = "0.8.28"
+
+[features]
+default = ["std"]
+std = []

@@ -1,5 +1,9 @@
 //! Shared page helpers.
 use super::*;
+use crate::api::types::DescriptionLink;
+use crate::i18n::{t, tf};
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode};
+use std::rc::Rc;
 
 pub enum Load<T> {
     Loading,
@@ -25,9 +29,9 @@ impl<T> Load<T> {
 /// Vertical scroll container used by every page, with a scrollbar that can be
 /// dragged (or clicked on its track) and keyboard scrolling (see [`scroll_page_key`]).
 pub fn page_scroll(id: &'static str, handle: &ScrollHandle) -> PageScroll {
-    ACTIVE_PAGE.with(|a| *a.borrow_mut() = Some((id, handle.clone())));
     PageScroll {
-        inner: div().id(id).size_full().overflow_y_scroll().track_scroll(handle).child(smooth_scroll(id, handle.clone())),
+        id,
+        inner: div().id("page-scroll-content").absolute().inset_0().overflow_y_scroll().track_scroll(handle),
         handle: handle.clone(),
     }
 }
@@ -36,8 +40,16 @@ pub fn page_scroll(id: &'static str, handle: &ScrollHandle) -> PageScroll {
 /// is drawn, and takes clicks, on top of it.
 #[derive(IntoElement)]
 pub struct PageScroll {
+    id: &'static str,
     inner: Stateful<Div>,
     handle: ScrollHandle,
+}
+
+impl PageScroll {
+    pub fn flex_col(mut self) -> Self {
+        self.inner = self.inner.flex().flex_col();
+        self
+    }
 }
 
 impl ParentElement for PageScroll {
@@ -47,20 +59,58 @@ impl ParentElement for PageScroll {
 }
 
 impl RenderOnce for PageScroll {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarMode};
-        // on hover rather than only while scrolling, so it can be found without a wheel
-        let mode = if crate::store::settings_snapshot().always_scrollbars { ScrollbarMode::Always } else { ScrollbarMode::Hover };
-        if gpui_kit::component::Theme::global(cx).scrollbar_mode != mode {
-            gpui_kit::component::Theme::set_scrollbar_mode(mode, cx);
-        }
-        self.inner.vertical_scrollbar(&self.handle)
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        scroll_viewport(self.id, &self.handle, self.inner, window, cx)
     }
 }
 
+/// Give virtual lists and regular scroll areas the same keyboard, glide and scrollbar behavior.
+pub fn scroll_viewport<H: PageScrollHandle + Clone + 'static, E: IntoElement>(
+    id: &'static str,
+    handle: &H,
+    content: E,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement + use<H, E> {
+    let shared: Rc<dyn PageScrollHandle> = Rc::new(handle.clone());
+    ACTIVE_PAGE.with(|a| *a.borrow_mut() = Some((id, shared.clone())));
+    let mode = if crate::store::settings_snapshot().always_scrollbars { ScrollbarMode::Always } else { ScrollbarMode::Hover };
+    div()
+        .id(id)
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        // Update the scroll position before the content reads it for this frame.
+        .child(smooth_scroll(id, shared))
+        .child(content)
+        // Keep the scrollbar overlay in viewport coordinates as the content moves underneath it.
+        .when(!window.is_inspector_picking(cx), |page| {
+            page.child(div().absolute().inset_0().child(
+                Scrollbar::vertical(handle).id("page-scrollbar").mode(mode).viewport_from_layout(),
+            ))
+        })
+}
+
+pub trait PageScrollHandle: ScrollbarHandle {
+    fn jump_to_end(&self) -> bool {
+        false
+    }
+}
+
+impl PageScrollHandle for ScrollHandle {}
+
+impl PageScrollHandle for ListState {
+    fn jump_to_end(&self) -> bool {
+        self.scroll_to_end();
+        true
+    }
+}
+
+type ActivePage = (&'static str, Rc<dyn PageScrollHandle>);
+
 thread_local! {
     /// the page scroll area drawn last, which is the page on screen
-    static ACTIVE_PAGE: std::cell::RefCell<Option<(&'static str, ScrollHandle)>> = const { std::cell::RefCell::new(None) };
+    static ACTIVE_PAGE: std::cell::RefCell<Option<ActivePage>> = const { std::cell::RefCell::new(None) };
     static GLIDES: std::cell::RefCell<std::collections::HashMap<&'static str, Glide>> = Default::default();
 }
 
@@ -73,15 +123,20 @@ struct Glide {
     precise: bool,
     /// a mouse wheel moved the page since the last frame (anything else that
     /// moves it, like dragging the scrollbar, is followed exactly)
-    wheel: bool,
+    wheel: Option<std::time::Instant>,
 }
 
 /// Scrolls the page on screen for PageUp/PageDown, Home/End, the arrow keys and
 /// Space / Shift+Space. Returns false when the key isn't a scrolling key.
 pub fn scroll_page_key(key: &str, shift: bool, window: &mut Window) -> bool {
     let Some((id, handle)) = ACTIVE_PAGE.with(|a| a.borrow().clone()) else { return false };
-    let view: f32 = handle.bounds().size.height.into();
-    let max: f32 = handle.max_offset().y.into();
+    if key == "end" && handle.jump_to_end() {
+        GLIDES.with(|g| g.borrow_mut().remove(id));
+        window.refresh();
+        return true;
+    }
+    let view: f32 = handle.viewport_bounds().size.height.into();
+    let max: f32 = scroll_limit(handle.as_ref()).into();
     let page = (view * 0.85).max(100.0);
     let delta = match (key, shift) {
         ("pagedown", _) | ("space", false) => -page,
@@ -95,13 +150,16 @@ pub fn scroll_page_key(key: &str, shift: bool, window: &mut Window) -> bool {
     let now: f32 = handle.offset().y.into();
     GLIDES.with(|g| {
         let mut g = g.borrow_mut();
-        let st = g.entry(id).or_insert(Glide { shown: now, target: now, last: std::time::Instant::now(), precise: false, wheel: false });
+        let st = g.entry(id).or_insert(Glide { shown: now, target: now, last: std::time::Instant::now(), precise: false, wheel: None });
         // from where it's already heading, so repeated presses add up
-        let from = if (st.target - now).abs() > 0.5 && !st.precise { st.target } else { now };
+        let in_flight = (st.target - now).abs() > 0.5 && !st.precise;
+        let from = if in_flight { st.target } else { now };
+        if !in_flight {
+            st.last = std::time::Instant::now();
+        }
         st.precise = false;
         st.target = (from + delta).clamp(-max.max(0.0), 0.0);
         st.shown = now;
-        st.last = std::time::Instant::now();
     });
     window.refresh();
     true
@@ -111,30 +169,35 @@ pub fn scroll_page_key(key: &str, shift: bool, window: &mut Window) -> bool {
 /// gpui moves the page by the whole step; this notices the jump, keeps it as the
 /// target and eases the visible position there over the next frames. Touchpad
 /// scrolling is already smooth and passes through untouched.
-fn smooth_scroll(id: &'static str, handle: ScrollHandle) -> impl IntoElement {
+fn smooth_scroll(id: &'static str, handle: Rc<dyn PageScrollHandle>) -> impl IntoElement {
     /// how quickly it settles: ~63% of the way every TAU
     const TAU: f32 = 0.045;
     /// mouse-wheel notches move a bit further than gpui's line step
     const WHEEL_BOOST: f32 = 1.4;
+    let wheel_handle = handle.clone();
     canvas(
         move |_, window, _| {
             let now = std::time::Instant::now();
             let actual: f32 = handle.offset().y.into();
-            let max: f32 = handle.max_offset().y.into();
+            let max: f32 = scroll_limit(handle.as_ref()).into();
             GLIDES.with(|g| {
                 let mut g = g.borrow_mut();
-                let st = g.entry(id).or_insert(Glide { shown: actual, target: actual, last: now, precise: false, wheel: false });
-                let wheel = std::mem::take(&mut st.wheel);
+                let st = g.entry(id).or_insert(Glide { shown: actual, target: actual, last: now, precise: false, wheel: None });
+                let wheel = st.wheel.take();
                 let moved = actual - st.shown;
                 if moved.abs() > 0.01 {
                     // something moved the page since the last frame
-                    if st.precise || !wheel || moved.abs() > 3000.0 {
+                    let Some(wheel_at) = wheel.filter(|_| !st.precise && moved.abs() <= 3000.0) else {
                         // touchpad, the scrollbar, or a jump (new page, scroll to top): follow it exactly
-                        *st = Glide { shown: actual, target: actual, last: now, precise: st.precise, wheel: false };
+                        *st = Glide { shown: actual, target: actual, last: now, precise: st.precise, wheel: None };
                         return;
+                    };
+                    if (st.target - st.shown).abs() < 0.5 {
+                        st.last = wheel_at;
                     }
-                    st.target = (st.target + moved * WHEEL_BOOST).clamp(-max.max(0.0), 0.0);
+                    st.target += moved * WHEEL_BOOST;
                 }
+                st.target = st.target.clamp(-max.max(0.0), 0.0);
                 let gap = st.target - st.shown;
                 if gap.abs() < 0.5 {
                     st.shown = st.target;
@@ -150,12 +213,13 @@ fn smooth_scroll(id: &'static str, handle: ScrollHandle) -> impl IntoElement {
             });
         },
         move |_, _, window, _| {
+            let wheel_handle = wheel_handle.clone();
             window.on_mouse_event(move |ev: &ScrollEvent, phase, _, _| {
-                if phase == DispatchPhase::Capture {
+                if phase == DispatchPhase::Capture && wheel_handle.viewport_bounds().contains(&ev.position) {
                     GLIDES.with(|g| {
                         if let Some(st) = g.borrow_mut().get_mut(id) {
                             st.precise = ev.delta.precise();
-                            st.wheel = true;
+                            st.wheel.get_or_insert_with(std::time::Instant::now);
                         }
                     });
                 }
@@ -175,10 +239,14 @@ pub fn nested_scroll(id: impl Into<ElementId>, list: impl IntoElement) -> Statef
 
 /// True when the scroll position is within `margin` of the bottom, or when the
 /// page is laid out but its content doesn't fill it (nothing to scroll yet).
-pub fn near_bottom(handle: &ScrollHandle, margin: f32) -> bool {
+fn scroll_limit(handle: &dyn ScrollbarHandle) -> Pixels {
+    (handle.content_size().height - handle.viewport_bounds().size.height).max(px(0.))
+}
+
+pub fn near_bottom(handle: &impl ScrollbarHandle, margin: f32) -> bool {
     let off: f32 = (-handle.offset().y).into();
-    let max: f32 = handle.max_offset().y.into();
-    let laid_out = handle.bounds().size.height > px(0.);
+    let max: f32 = scroll_limit(handle).into();
+    let laid_out = handle.viewport_bounds().size.height > px(0.);
     (max > 0.0 && off >= max - margin) || (laid_out && max <= 0.0)
 }
 
@@ -194,7 +262,7 @@ pub fn section_title(text: impl Into<SharedString>, cx: &App) -> Div {
 
 /// Sets up a "load more" trigger: call from render; spawns `f` when near the bottom.
 pub fn maybe_load_more<T: 'static>(
-    handle: &ScrollHandle,
+    handle: &impl ScrollbarHandle,
     loading: &mut bool,
     has_more: bool,
     cx: &mut Context<T>,
@@ -274,6 +342,21 @@ pub(crate) fn tokenize(text: &str) -> Vec<(std::ops::Range<usize>, Token)> {
     out
 }
 
+fn rich_text_tokens(text: &str, links: &[DescriptionLink]) -> Vec<(std::ops::Range<usize>, Token)> {
+    let mut tokens = tokenize(text);
+    if !links.is_empty() {
+        for link in links {
+            let range = link.range.start..link.range.end.min(text.len());
+            if text.get(range.clone()).is_some_and(|label| !label.is_empty()) {
+                tokens.retain(|(r, _)| r.end <= range.start || range.end <= r.start);
+                tokens.push((range, Token::Url(link.url.clone())));
+            }
+        }
+        tokens.sort_by_key(|(range, _)| range.start);
+    }
+    tokens
+}
+
 /// Escapes text so Markdown shows it literally.
 fn md_escape(t: &str, out: &mut String) {
     for c in t.chars() {
@@ -286,10 +369,10 @@ fn md_escape(t: &str, out: &mut String) {
 
 /// Plain text with links, timestamps, #hashtags and @handles as Markdown links
 /// (app-internal schemes for the non-URL ones), line breaks kept.
-fn to_markdown(text: &str) -> String {
+fn to_markdown(text: &str, tokens: &[(std::ops::Range<usize>, Token)]) -> String {
     let mut md = String::with_capacity(text.len() + 64);
     let mut last = 0;
-    for (r, tok) in tokenize(text) {
+    for (r, tok) in tokens {
         md_escape(&text[last..r.start], &mut md);
         let label = &text[r.clone()];
         md.push('[');
@@ -301,9 +384,9 @@ fn to_markdown(text: &str) -> String {
                 md.push_str(&u.replace(['<', '>', ' '], ""));
                 md.push('>');
             }
-            Token::Time(t) => md.push_str(&format!("st-time:{}", t as u64)),
-            Token::Hashtag(h) => md.push_str(&format!("st-tag:{}", crate::api::http::urlencode(&h))),
-            Token::Handle(h) => md.push_str(&format!("st-handle:{}", crate::api::http::urlencode(&h))),
+            Token::Time(t) => md.push_str(&format!("st-time:{}", *t as u64)),
+            Token::Hashtag(h) => md.push_str(&format!("st-tag:{}", crate::api::http::urlencode(h))),
+            Token::Handle(h) => md.push_str(&format!("st-handle:{}", crate::api::http::urlencode(h))),
         }
         md.push(')');
         last = r.end;
@@ -318,7 +401,7 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
         let t: f64 = t.parse().unwrap_or(0.0);
         crate::player::controller::player(cx).update(cx, |p, cx| {
             p.seek_to(t);
-            p.set_paused(false);
+            p.set_paused(false, cx);
             cx.notify();
         });
         // back up to the player, like YouTube does
@@ -337,30 +420,70 @@ fn open_link(url: &str, window: &mut Window, cx: &mut App) {
             }
         })
         .detach();
-    } else if let Some(r) = crate::api::innertube::parse_youtube_url(url) {
-        let route = match r {
-            crate::api::innertube::ResolvedUrl::Video(id) => crate::ui::app::Route::Watch { id, playlist: None, start: None },
-            crate::api::innertube::ResolvedUrl::Channel(id) => crate::ui::app::Route::Channel(id),
-            crate::api::innertube::ResolvedUrl::Playlist(id) => crate::ui::app::Route::Playlist(id),
-        };
+    } else if let Some(route) = crate::ui::app::route_from_link(url).filter(|r| !matches!(r, crate::ui::app::Route::Search(_))) {
         crate::ui::app::navigate(route, window, cx);
     } else {
         crate::ui::open_web(url);
     }
 }
 
+/// True when the window currently has a non-empty text selection.
+/// Clickable parents use this so finishing a drag-selection doesn't also navigate.
+pub fn has_text_selection(window: &mut Window, cx: &mut App) -> bool {
+    !gpui_kit::base::TextSelection::selected_text(window, cx).is_empty()
+}
+
+/// Plain text that can be dragged to select and copied with Ctrl+C.
+/// Right-click opens a menu to copy the selection or the full text.
+pub fn selectable_text(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Div {
+    let text: SharedString = text.into();
+    let copy_all = text.clone();
+    div()
+        .cursor_text()
+        .child(gpui_kit::base::SelectableText::new(id, text))
+        .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
+            cx.stop_propagation();
+            let selected = gpui_kit::base::TextSelection::selected_text(window, cx).trim().to_string();
+            let all = copy_all.to_string();
+            let mut items = Vec::new();
+            if !selected.is_empty() && selected != all {
+                items.push(crate::ui::app::MenuItem::new("copy", t("Copy"), move |_, cx| {
+                    crate::ui::copy_text_to_clipboard(selected.clone(), cx);
+                }));
+            }
+            let label = if items.is_empty() { t("Copy") } else { t("Copy all text") };
+            items.push(crate::ui::app::MenuItem::new("copy", label, move |_, cx| {
+                crate::ui::copy_text_to_clipboard(all.clone(), cx);
+            }));
+            crate::ui::app::open_menu(ev.position, items, window, cx);
+        })
+}
+
 /// Selectable text (drag to select, Ctrl+C) with clickable links, timestamps,
-/// hashtags and handles. Right-click copies the whole text.
+/// hashtags and handles. Right-click copies the selection or the whole text.
 pub fn rich_text(id: impl Into<ElementId>, text: String, cx: &App) -> AnyElement {
     rich_text_with(id, text, &[], cx)
 }
 
+pub fn rich_text_with_links(id: impl Into<ElementId>, text: String, links: &[DescriptionLink]) -> AnyElement {
+    render_rich_text(id, text, &[], links)
+}
+
 /// [`rich_text`] with channel emojis (shortcut, image URL) drawn inline as images.
-pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String, String)], cx: &App) -> AnyElement {
-    let p = pal(cx);
-    let urls: Vec<String> = tokenize(&text).into_iter().filter_map(|(_, t)| if let Token::Url(u) = t { Some(u) } else { None }).collect();
+pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String, String)], _cx: &App) -> AnyElement {
+    render_rich_text(id, text, emojis, &[])
+}
+
+fn render_rich_text(
+    id: impl Into<ElementId>,
+    text: String,
+    emojis: &[(String, String)],
+    links: &[DescriptionLink],
+) -> AnyElement {
+    let tokens = rich_text_tokens(&text, links);
+    let urls: Vec<String> = tokens.iter().filter_map(|(_, t)| if let Token::Url(u) = t { Some(u.clone()) } else { None }).collect();
     let md = if emojis.is_empty() {
-        to_markdown(&text)
+        to_markdown(&text, &tokens)
     } else {
         // swap each shortcut for a marker the Markdown conversion leaves alone,
         // then the marker for an inline image
@@ -368,7 +491,7 @@ pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String,
         for (i, (code, _)) in emojis.iter().enumerate() {
             marked = marked.replace(code.as_str(), &format!("\u{E000}{i}\u{E001}"));
         }
-        let mut md = to_markdown(&marked);
+        let mut md = to_markdown(&marked, &tokenize(&marked));
         for (i, (code, url)) in emojis.iter().enumerate() {
             let alt: String = code.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
             let src: String = url.chars().filter(|c| !matches!(c, '<' | '>' | '"' | ' ')).collect();
@@ -379,18 +502,26 @@ pub fn rich_text_with(id: impl Into<ElementId>, text: String, emojis: &[(String,
     let view = gpui_kit::base::TextView::markdown(id, md)
         .selectable(true)
         .on_link_click(|url, _, window, cx| open_link(url, window, cx));
-    let copy_text = text.clone();
-    let _ = p;
+    let copy_text = text;
     div()
         .w_full()
         .child(view)
         .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, window, cx| {
             cx.stop_propagation();
-            let t = copy_text.clone();
-            let mut items = vec![crate::ui::app::MenuItem::new("copy", "Copy all text", move |_, cx| crate::ui::copy_to_clipboard(t.clone(), cx))];
+            let selected = gpui_kit::base::TextSelection::selected_text(window, cx).trim().to_string();
+            let text = copy_text.clone();
+            let mut items = Vec::new();
+            if !selected.is_empty() && selected != text {
+                items.push(crate::ui::app::MenuItem::new("copy", t("Copy"), move |_, cx| {
+                    crate::ui::copy_text_to_clipboard(selected.clone(), cx);
+                }));
+            }
+            items.push(crate::ui::app::MenuItem::new("copy", t("Copy all text"), move |_, cx| {
+                crate::ui::copy_text_to_clipboard(text.clone(), cx);
+            }));
             for u in urls.iter().take(3) {
                 let u2 = u.clone();
-                let label = if u.chars().count() > 40 { format!("Copy link {}…", u.chars().take(40).collect::<String>()) } else { format!("Copy link {u}") };
+                let label = if u.chars().count() > 40 { tf!("Copy link {0}…", u.chars().take(40).collect::<String>()) } else { tf!("Copy link {0}", u) };
                 items.push(crate::ui::app::MenuItem::new("link", label, move |_, cx| crate::ui::copy_to_clipboard(u2.clone(), cx)));
             }
             crate::ui::app::open_menu(ev.position, items, window, cx);
@@ -445,7 +576,7 @@ pub fn comment_body(id: impl Into<SharedString>, c: &crate::api::types::Comment,
                     .text_color(p.text2)
                     .cursor_pointer()
                     .hover(move |s| s.text_color(p.text))
-                    .child(if open { "Show less" } else { "Read more" })
+                    .child(if open { t("Show less") } else { t("Read more") })
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         OPEN_COMMENTS.with(|o| {
@@ -471,7 +602,7 @@ pub fn comment_body(id: impl Into<SharedString>, c: &crate::api::types::Comment,
 
 #[cfg(test)]
 mod clamp_tests {
-    use super::clamp_text;
+    use super::{DescriptionLink, clamp_text, rich_text_tokens, to_markdown};
     #[test]
     fn clamps() {
         assert_eq!(clamp_text("short", 5, 400), None);
@@ -484,6 +615,22 @@ b…"));
         assert!(c.chars().count() <= 401 && c.ends_with("word…"));
         // multi-byte text is cut on a char boundary
         assert!(clamp_text(&"é".repeat(500), 5, 400).is_some());
+    }
+
+    #[test]
+    fn rich_text_preserves_labels_and_links_in_collapsed_descriptions() {
+        let text = "Watch [this] at 1:23\r\n#Playlist";
+        let playlist_start = text.find('#').unwrap();
+        let links = [
+            DescriptionLink { range: 6..12, url: "https://www.youtube.com/watch?v=_0do0jAoJt8".into() },
+            DescriptionLink { range: playlist_start..text.len() + 10, url: "https://www.youtube.com/playlist?list=PLExample".into() },
+            DescriptionLink { range: text.len() + 1..text.len() + 4, url: "https://www.youtube.com/playlist?list=PLOutside".into() },
+        ];
+        let md = to_markdown(text, &rich_text_tokens(text, &links));
+        assert!(md.contains(r"[\[this\]](<https://www.youtube.com/watch?v=_0do0jAoJt8>)"));
+        assert!(md.contains("[1\\:23](st-time:83)"));
+        assert!(md.contains(r"[\#Playlist](<https://www.youtube.com/playlist?list=PLExample>)"));
+        assert!(!md.contains("PLOutside"));
     }
 }
 

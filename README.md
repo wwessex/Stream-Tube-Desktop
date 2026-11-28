@@ -39,7 +39,7 @@
 
 I wanted YouTube on my desktop without keeping a browser tab open, and without the
 ads, autoplaying junk and sponsor reads. The existing options were either Electron
-apps that eat a gigabyte of RAM or web frontends that break every other week.
+apps or web frontends that break every other week.
 Stream Tube is a single native app: the UI is drawn on the GPU with
 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and video
 goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
@@ -53,29 +53,43 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Nothing to install or keep updated: it isn't an ad blocker that YouTube can break, ads simply aren't part of how the app plays video
 
 **Watching**
-- Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), playlists and search, with search suggestions and your recent searches
+- Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), and playlists
+- Search with filters, suggestions, recent searches and more results as you scroll
 - A personal Home without an account: "For you" recommends videos related to what you've watched and searched in the app, mixed with new uploads from your subscriptions. Signed in, Home is your own YouTube Home feed
 - A *Recently uploaded* chip on Home, like youtube.com's: videos from your Home feed and subscriptions uploaded in the last two weeks, newest first
-- Tabs: Ctrl+click anything (or *Open in new tab* in a video's menu) to open it in the background, and switch with Ctrl+Tab, Ctrl+1…9 or a click. Ctrl+T opens a new tab, Ctrl+W or a middle click closes one
+- Hover a video title in a grid or list to read the full title
+- Ctrl+click a link or middle-click a video to open it in a background tab. A video's menu also has *Open in new tab*. Switch with Ctrl+Tab, Ctrl+1…9 or a click. Ctrl+T opens a new tab. Ctrl+W or a middle click on the tab closes it.
 - Videos made for kids (YouTube Kids) play and download like any other video
 - Old video annotations are back: notes, speech bubbles and clickable links from YouTube's annotation archive, drawn over the video where they used to be (turn them off in *Settings → Player* or from the player's gear menu)
 - Arabic, Hebrew and other right-to-left text is shown in the right order
 - Shorts follow your account's recommendations when you're signed in, or start from the Shorts you watched last
+- Download the current Short from the vertical player's download button
 - libmpv player with hardware decoding, codec preference (AV1, VP9 or H.264), 360p up to 4K, enhanced bitrate, speed control (remembered per channel if you want), captions you can style (font, colour, opacity, background and edge, with a live preview), chapters and seek-bar preview thumbnails
 - A chapters panel beside the player, like youtube.com: click the chapter name in the player bar (or *View all* under the description) to list every chapter with its thumbnail, follow the one playing, and jump to any of them
 - Timestamps in descriptions and comments seek the video and bring the player back into view
 - Resumes where you left off, remembers your last quality, autoplays the next video or loops, and plays whole playlists as a queue
-- A miniplayer while you browse that you can drag anywhere and resize (it remembers where you put it), a picture-in-picture window, theater mode and fullscreen
-- Keeps playing when minimized, or pauses and resumes when you come back
+- Turn on *Original video titles* in Settings to show the creator's title when opening a video.
+- Hover over the video to step through available resolutions or adjust playback speed in 0.5× increments. Click the speed to reset it to 1×.
+- The picture-in-picture button opens the draggable in-app miniplayer or a floating window above other apps. Choose the mode in *Settings → Player*. Theater mode and fullscreen are also available, and the app remembers your theater setting.
+- Keeps playing when minimized, or pauses and resumes when you come back. On Windows, active video playback keeps the display awake.
+- Windows media controls can pause playback, resume it and move through the video queue.
+- Music: signed in, *Explore → Music* shows YouTube's music picks for your account, and each song plays on as its mix. Music mode, offered when a mix starts or from the player's note button, works like YouTube Music: a player bar along the bottom of every page and a *Now playing* view with the cover art or the video beside what plays next.
+- On Windows, *Settings → General → Minimize to tray* keeps Stream Tube in the notification area when you minimize or close the window. Use the tray icon to reopen or quit the app.
+- Start *Cast over LAN* in Settings and open the temporary link on a phone on the same trusted network. If the desktop has more than one local address, choose the one on your phone's network. Paste a YouTube video link to play it on the desktop.
+- Turn on *Independent tab playback* and restart Stream Tube to play up to three tabs at once. Each tab keeps its own queue. Background tabs play audio, and a tab with a floating picture-in-picture window keeps showing video there.
 - Live streams with live chat (Top chat or every message), and chatting when signed in
 - Shorts in a vertical player that moves to the next one by itself, or open them in the regular player. Shorts comments open their replies as threads too
-- Hold Space or press and hold on the video to play at 2x
+- Hold Space or press and hold the main video to play at 2x
+- Press `+` / `-` or `>` / `<` to move to the next or previous 0.25x playback speed step
 - Hover previews: rest the pointer on a thumbnail and it plays inside it, muted, with a seek bar to skip around
 - Most replayed graph with "jump ahead", ambient glow around the player (on or off from the player's gear menu), force original audio instead of auto-dubbing
+- Aspect ratio controls for ultrawide screens, like the Ultrawidify extension: *Auto* finds a film's black bars and crops them away so it fills a 21:9 or 32:9 monitor, or pick 21:9, 18:9 or 32:9, *Zoom to fill* or *Stretch*. Choose it from the player's gear menu or *Settings → Player*, or press *Z* to cycle
 - A screenshot button in the player bar
+- Step one frame at a time with `,` or `.` while paused, or with Previous frame and Next frame in the player's right-click menu
 - Comments sorted by Top, Timed or Newest. *Timed* works like youtube.com: comments that mention a moment of the video appear as playback reaches it
 - Comments show animated GIFs, stickers and channel emojis, and replies are drawn as threads, with answers to a reply nested under it. Long comments and channel descriptions are shortened with *Read more* / *Show more*
-- Keyboard shortcuts for everything you'd expect (play/pause, seek, volume, captions, fullscreen, theater, picture-in-picture, next/previous, and Ctrl+←/→ for the previous/next chapter)
+- Keyboard shortcuts for playback, seek, volume, captions, fullscreen, theater, picture-in-picture and the queue. Z changes the aspect ratio and Ctrl+←/→ changes chapters. Playback letter keys also work with the Russian layout.
+- Arrow keys briefly show the volume or the number of seconds skipped over the video
 - "Open in external player" with no setup: it uses VLC or mpv if one is installed, otherwise your default video player, and continues from where you were
 - Right-click the video for loop, copy link (optionally at the current time), screenshot and **Stats for nerds**: resolution, codecs, dropped frames, hardware decoding, bitrate, buffer health and connection speed, updated live (also *Shift+I*)
 
@@ -96,16 +110,18 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
-- Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
-- The top-bar **Sign in** label and icon follow your selected accent. Their shade adjusts to maintain at least **4.5:1** contrast at rest and on hover in Light and Dark modes
-- Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
-- Connect your YouTube history (*Settings → General*) and it works the other way too: videos you watch in Stream Tube show up in your YouTube history, and your phone or TV resumes them where you stopped. You sign in once in a browser window with a fresh profile (Chrome, Edge, Brave or Chromium) that closes and is deleted afterwards, or load a `cookies.txt` file instead
+- Sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button. Stream Tube opens youtube.com/activate in your default browser with the sign-in code already filled in, so you only pick your account and allow access. Stream Tube imports your YouTube watch history and recent searches automatically after sign-in
+- Sign in to YouTube to open Watch later, Liked videos and any account Favorites playlist from the sidebar. The local playlists are available in Library.
+- Signed in, videos play through YouTube's TV client as your account: no "confirm you're not a bot" checks, and age-restricted videos play. The JavaScript puzzles in YouTube's stream URLs are solved with the scripts from [yt-dlp/ejs](https://github.com/yt-dlp/ejs) in a built-in QuickJS engine, or in [Deno](https://deno.com) or [Node.js](https://nodejs.org) when one is installed, which is a few times faster
+- Videos you watch in Stream Tube and the positions you stop at go back to your YouTube account through the same sign-in, so other devices resume where you left off. If you prefer, connect a browser session instead under *Settings → General → YouTube watch history*: sign in with a fresh browser profile (Chrome, Edge, Brave or Chromium) that is deleted afterwards, or load a `cookies.txt` file
+- Your YouTube watch history refreshes in the background and when you return to Stream Tube
 - On Apple Silicon, this branch also offers an [experimental Safari watch-history connection](#safari-watch-history-prototype) for a signed-in YouTube tab
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 
 **Downloads**
 - Download video or audio in any quality through yt-dlp, with SponsorBlock chapters, from a download manager with progress
+- Save a transcript as plain text (.txt) or timestamped subtitles (.srt) from the Download menu. A single caption track downloads immediately. If several tracks are available, choose the language; automatically generated tracks are labeled in the picker.
 - Without yt-dlp it falls back to the built-in downloader (360p/720p or audio)
 - yt-dlp and FFmpeg can be fetched from inside the app, on Windows and Linux (*Settings → Downloads*), with a progress bar, so nothing has to be installed by hand
 
@@ -116,36 +132,18 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Network**
 - A proxy setting (HTTP or SOCKS) that covers browsing, playback, thumbnails, downloads and sign-in
 - On Linux, a choice of Wayland or X11, with an automatic switch to X11 if a Wayland window never shows up (ChromeOS)
-- IPv4-only mode, and a choice of playback client (visionOS, Android VR or yt-dlp) if videos ever stop loading
+- IPv4-only mode applies to new requests as soon as you change it. You can also choose a playback client (TV, visionOS, Android VR or yt-dlp).
 
 **Looks the way you like**
 - Dark, light or follow Windows
 - Seven accent colours used across the app, and the app icon changes colour to match, on the taskbar and on your desktop shortcuts too
 - Interface scaling, density, thumbnail corner style, grid columns, start page, language and region
+- English, Azerbaijani, French, German, Japanese, Kazakh, Russian, Turkish, Ukrainian, Simplified Chinese and Traditional Chinese in *Settings → General → App language*. YouTube has a separate language setting.
 - Smooth page, dialog and menu transitions, and mouse-wheel scrolling that glides instead of jumping
 - Scrollbars you can drag (shown on hover, or always), and pages scroll from the keyboard too: Page Up/Down, Home/End, the arrow keys and Space
 
 **Keeps itself up to date**
 - Checks for new releases at startup and installs them in one click, and can update yt-dlp for you. Every download is checked against its SHA-256 before it is used
-
-## Performance
-
-Stream Tube versus youtube.com in Microsoft Edge (clean profile, no extensions) on
-the same Windows 11 PC, playing the same video. Numbers are the working set of
-every process involved, after browsing a few pages.
-
-| | youtube.com in Edge | Stream Tube 0.4.0-alpha |
-|---|---|---|
-| Processes | 11–12 | 1 |
-| RAM, idle on Home | 1,073 MB | **~405 MB** |
-| RAM, playing a video | 1,203 MB | **~565 MB** |
-
-Stream Tube uses less than half the RAM of the browser, and it stays flat as you
-browse: thumbnails are kept at the size they're drawn and the ones you've scrolled
-past are freed. While playing, part of the memory is a read-ahead buffer that keeps
-seeking instant. Enable *Settings → Player → Hardware decoding* and restart the app
-to use the system video decoder when available. Results depend on the video,
-resolution and hardware.
 
 ## Screenshots
 
@@ -173,12 +171,9 @@ resolution and hardware.
 
 ### macOS preview
 
-These screenshots show Stream Tube running on Apple Silicon macOS. The
-[Stream Tube 0.7.2-alpha macOS branch](https://github.com/wwessex/Stream-Tube-Desktop/tree/codex/macos-0.7.2-alpha)
-contains the community port. Follow the
-[macOS build instructions](https://github.com/wwessex/Stream-Tube-Desktop/blob/codex/macos-0.7.2-alpha/README.md#macos-local-build)
-to build it locally. For the verification results, see the
-[macOS release checklist](https://github.com/wwessex/Stream-Tube-Desktop/tree/codex/macos-0.7.2-alpha#macos-release-checklist).
+These screenshots show Stream Tube running on Apple Silicon macOS.
+The [macOS build instructions](#macos-local-build) cover the 1.0.0 checkout.
+The [macOS release checklist](#macos-release-checklist) records the 0.7.2-alpha tests.
 
 <p align="center">
   <a href="docs/screenshots/macos-picture-in-picture.png">
@@ -214,8 +209,12 @@ This is an early alpha, so expect rough edges.
 **Windows 10/11 (64-bit)**: run `StreamTube-<version>-setup.exe`. It installs for
 your user only, so no administrator prompt, and the app updates itself when a new
 release comes out (*Settings → About*).
-To run it without installing, unzip `StreamTube-<version>-windows-x64.zip` and run
-`streamtube.exe`. It doesn't need the Visual C++ runtime.
+To run it without installing, choose *Extract All* on
+`StreamTube-<version>-windows-x64.zip`, then open `streamtube.exe` in the extracted
+folder with `libmpv-2.dll` beside it. It doesn't need the Visual C++ runtime.
+After you extract a build with portable update support, use *Settings → About*
+for future updates. Stream Tube replaces the app files in that folder and
+restarts with the same settings and history.
 Older PCs whose graphics driver has no Vulkan support (for example Intel HD 4000)
 work too: the app carries its own Vulkan loader for libmpv and uses it only when
 Windows doesn't have one.
@@ -223,21 +222,21 @@ Windows doesn't have one.
 **Debian, Ubuntu, Mint**: install the `.deb`. This also installs libmpv:
 
 ```sh
-sudo apt install ./streamtube_0.7.2-alpha_amd64.deb
+sudo apt install ./streamtube_1.0.0_amd64.deb
 ```
 
 **Fedora, openSUSE**: install the `.rpm`:
 
 ```sh
-sudo dnf install ./streamtube-0.7.2-alpha.x86_64.rpm
+sudo dnf install ./streamtube-1.0.0.x86_64.rpm
 ```
 
 **Any Linux (x86_64), nothing to install**: download the AppImage, make it executable
 and run it. libmpv is inside, so video plays without installing anything else:
 
 ```sh
-chmod +x StreamTube-0.7.2-alpha-x86_64.AppImage
-./StreamTube-0.7.2-alpha-x86_64.AppImage
+chmod +x StreamTube-1.0.0-x86_64.AppImage
+./StreamTube-1.0.0-x86_64.AppImage
 ```
 
 **Other Linux (x86_64), installed for your user**: unpack `StreamTube-<version>-linux-x86_64.tar.gz` and run
@@ -279,11 +278,11 @@ and each file has a signed build provenance attestation that ties it to the work
 run that built it. With the [GitHub CLI](https://cli.github.com):
 
 ```sh
-gh attestation verify StreamTube-0.7.2-alpha-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
+gh attestation verify StreamTube-1.0.0-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
 ```
 
-Releases are immutable once published, so their files can't be swapped afterwards.
-The in-app updater also checks the installer's SHA-256 before running it.
+Check a download against those before running it. The in-app updater also checks
+the installer's SHA-256 before running it.
 
 ## Building
 
@@ -311,7 +310,7 @@ else, copy `libmpv-2.dll` next to it.
 To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
 
 ```powershell
-ISCC.exe /DAppVersion=0.7.2-alpha installer\streamtube.iss
+ISCC.exe /DAppVersion=1.0.0 installer\streamtube.iss
 ```
 
 It lands in `dist\`. On Linux, install the packages listed in
@@ -319,8 +318,8 @@ It lands in `dist\`. On Linux, install the packages listed in
 
 ### macOS local build
 
-Install Xcode and the Homebrew `mpv` formula. The formula also supplies FFmpeg and
-yt-dlp. Use Rust 1.100.0, or a newer stable toolchain compatible with `Cargo.lock`.
+Install the Xcode Command Line Tools and the Homebrew `mpv` formula. The formula
+also supplies FFmpeg and yt-dlp. Use Rust 1.100.0 or a compatible stable toolchain.
 
 ```sh
 brew install mpv
@@ -330,7 +329,7 @@ RUSTUP_TOOLCHAIN=1.100.0 bash packaging/macos/build-app.sh
 
 Run these commands from the repository root in a native Apple Silicon shell.
 The script prints the path to the ad hoc-signed `Stream Tube.app` under
-`dist/macos/`. The app uses Homebrew's libmpv on the Mac where it runs.
+`dist/macos.noindex/`. The app uses Homebrew's libmpv on the Mac where it runs.
 Rebuild from source to update a local build.
 For a checkout in a synchronised folder, you can pass a local output directory
 as the script's first argument, for example `"$HOME/Downloads/StreamTube-builds"`.
@@ -341,11 +340,14 @@ release builds collect that ZIP in the project's draft release.
 
 #### Safari watch-history prototype
 
-For Safari-only watch-history sync, build the separate **Stream Tube Safari
+For watch-history sync and comment reactions using a single Safari connection,
+build the separate **Stream Tube Safari
 Prototype.app** with its embedded extension and follow the [build and connection
 instructions](packaging/macos/safari-history/README.md). You grant the extension
 access to `www.youtube.com` and choose when to connect a signed-in tab. The app
 keeps the Safari session in memory until you disconnect or quit.
+
+To test alongside older prototypes, [build a labelled Safari test copy](packaging/macos/safari-history/README.md#build-a-test-copy-alongside-older-prototypes).
 
 The player queues a final watch-time report when you close it or exit Stream
 Tube. [Opt-in playback diagnostics](packaging/macos/safari-history/README.md#playback-diagnostics)
@@ -372,14 +374,14 @@ and [Apple Silicon ZIP](https://github.com/wwessex/Stream-Tube-Desktop/actions/r
 #### Check hardware decoding
 
 Enable *Settings → Player → Hardware decoding*, restart Stream Tube, and play a
-video. Open *Stats for nerds* from the right-click menu or press Shift+I. A
-**Hardware decoding** value of `videotoolbox-copy` means libmpv is using Apple's
-VideoToolbox decoder. libmpv copies the decoded frames into system memory for
-the app's software render path. If a codec or format is unavailable in hardware,
-libmpv falls back to software decoding.
+video. Open *Stats for nerds* from the right-click menu or press Shift+I.
+**Hardware decoding** shows `videotoolbox` when libmpv keeps decoded frames on
+the GPU and `videotoolbox-copy` when it copies decoded frames to system memory
+for the software render path. libmpv falls back to software decoding when
+hardware decoding is unavailable for the codec or format.
 
-To check the same render path without opening a window, use a local H.264 video
-and run the opt-in software and VideoToolbox tests:
+To check the software, VideoToolbox copy and GPU render paths without opening a
+window, use a local H.264 video and run the opt-in tests:
 
 ```sh
 STREAMTUBE_MPV_TEST_VIDEO="/absolute/path/to/video.mp4" \
@@ -413,9 +415,9 @@ src/
 
 ## Known issues
 
-- YouTube sometimes answers with "Sign in to confirm you're not a bot". When that
-  happens, signing in inside the app or updating yt-dlp usually fixes it.
-- Windows is the main platform. The Linux build is new and less tested. macOS has a local build path.
+- YouTube sometimes answers with "Sign in to confirm you're not a bot". Signing in
+  inside the app avoids it; otherwise updating yt-dlp usually fixes it.
+- Windows is the main platform. The Linux build is new and less tested; macOS has a local build path.
 
 ## Contributing
 
@@ -430,6 +432,9 @@ Stream Tube leans on a lot of other people's work:
 [Return YouTube Dislike](https://returnyoutubedislike.com),
 [GPUI](https://www.gpui.rs), [FFmpeg](https://ffmpeg.org) and the annotation archive saved by
 [Archive Team](https://wiki.archiveteam.org/index.php/YouTube/Annotations).
+
+Thanks also to everyone who has sent fixes and features; each release's notes name
+who did what, and the full list is on the [contributors page](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/graphs/contributors).
 
 It's an independent project and isn't affiliated with or endorsed by YouTube or Google.
 

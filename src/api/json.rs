@@ -132,6 +132,17 @@ mod avatar_tests {
     }
 }
 
+/// A thumbnail sized for a 168 pt recommendation card on a Retina display.
+pub fn compact_thumb(v: &Value) -> Option<String> {
+    let images = v.get("thumbnails").or_else(|| v.get("sources"))?.as_array()?;
+    images
+        .iter()
+        .filter_map(|image| Some((image.get("width")?.as_u64()?, image.get("url")?.as_str()?)))
+        .filter(|(width, _)| (320..=480).contains(width))
+        .min_by_key(|(width, _)| width.abs_diff(336))
+        .map(|(_, url)| fix_url(url))
+}
+
 pub fn small_thumb(v: &Value) -> Option<String> {
     let arr = v
         .get("thumbnails")
@@ -198,8 +209,10 @@ pub fn parse_relative_time(s: &str) -> Option<i64> {
 fn relative_secs(s: &str) -> Option<i64> {
     let lower = s.to_lowercase();
     // view and subscriber counts also start with a number ("3 M de vues")
-    const COUNTS: [&str; 11] =
-        ["view", "vue", "aufruf", "visualiz", "vista", "weergave", "watching", "spectat", "zuschau", "subscri", "abonn"];
+    const COUNTS: [&str; 15] = [
+        "view", "vue", "aufruf", "visualiz", "vista", "weergave", "watching", "spectat", "zuschau", "subscri", "abonn", "visning", "просмотр",
+        "перегляд", "vizion",
+    ];
     if COUNTS.iter().any(|c| lower.contains(c)) {
         return None;
     }
@@ -214,38 +227,75 @@ fn relative_secs(s: &str) -> Option<i64> {
     }
     // "5m" (English compact) touches the number; "21 M" on its own is a count
     let attached = !after.starts_with(char::is_whitespace);
-    let unit: String = after.trim_start().chars().take_while(|c| c.is_alphabetic()).collect();
+    // Romanian puts "de" between the number and the unit ("acum 20 de ore")
+    let word = after.trim_start();
+    let word = word.strip_prefix("de ").unwrap_or(word);
+    let unit: String = word.chars().take_while(|c| c.is_alphabetic()).collect();
     let u = unit.as_str();
-    let p = |prefixes: &[&str]| prefixes.iter().any(|x| u.starts_with(x));
-    let secs = if u.is_empty() || u == "k" {
+    if u.is_empty() || u == "k" {
         return None;
-    } else if u == "m" {
-        if attached {
-            60
+    }
+    if u == "m" {
+        return if attached {
+            Some(n * 60)
         } else if lower.contains("il y a") {
             // "il y a 1 m." is a month in French's short form
-            30 * 86400
+            Some(n * 30 * 86400)
         } else {
-            return None;
+            None
+        };
+    }
+    if u == "ay" {
+        // Turkish month ("2 ay önce")
+        return Some(n * 30 * 86400);
+    }
+    const MIN: i64 = 60;
+    const HOUR: i64 = 3600;
+    const DAY: i64 = 86400;
+    // Most specific first: the units of languages whose words would otherwise
+    // match a shorter prefix of another language ("minggu" is a week, not
+    // minutes; "hari" a day and "jam" an hour, not "h"/"j"; Ukrainian "годин"
+    // hours, not Russian "год" years). The generic one-letter prefixes come last.
+    const UNITS: &[(&[&str], i64)] = &[
+        (&["minggu"], 7 * DAY),
+        (&["hari", "ngày", "gün", "päiv", "nap", "døgn", "zi", "ден", "дн", "dzie", "ημέρ", "يوم", "أيام", "दिन", "วัน", "日", "天", "일"], DAY),
+        (
+            &["jam", "giờ", "saat", "tunt", "tim", "hod", "ór", "час", "годин", "ώρ", "ساع", "घंट", "ชั", "時間", "小时", "小時", "시간"],
+            HOUR,
+        ),
+        (
+            &[
+                "mo", "mois", "mes", "mês", "monat", "maand", "mies", "mån", "kuuk", "bulan", "tháng", "hónap", "lun", "měs", "месяц", "мес", "міс",
+                "μήν", "شهر", "أشهر", "महीन", "माह", "เดือน", "か月", "ヶ月", "カ月", "个月", "個月", "개월",
+            ],
+            30 * DAY,
+        ),
+        (&["min", "menit", "dak", "perc", "phút", "мин", "хвил", "λεπτ", "دق", "मिनट", "นาที", "分", "분"], MIN),
+        (
+            &[
+                "sem", "settiman", "woche", "week", "wk", "w", "tydz", "tyg", "veck", "uge", "uke", "viik", "hafta", "tuần", "hét", "týd", "săpt",
+                "недел", "тиж", "εβδ", "أسبوع", "أسابيع", "सप्ताह", "हफ", "สัปดา", "週", "周", "주",
+            ],
+            7 * DAY,
+        ),
+        (&["sec", "seg", "sek", "seconde", "secondo", "detik", "san", "giây", "másod", "сек", "δευτ", "ثان", "ثوان", "सेकंड", "วินาที", "秒", "초", "s"], 1),
+        (&["h", "heure", "stund", "ora", "ore", "uur", "godz"], HOUR),
+        (&["d", "jour", "j", "tag", "giorn", "dag", "dzie"], DAY),
+        (
+            &[
+                "y", "an", "añ", "jahr", "jaar", "ann", "rok", "lat", "år", "vuo", "év", "yıl", "tahun", "năm", "let", "год", "лет", "рік", "рок", "έτ",
+                "سن", "वर", "साल", "ปี", "年", "년", "a",
+            ],
+            365 * DAY,
+        ),
+    ];
+    for (prefixes, secs) in UNITS {
+        // "s" and "a" only as the whole unit ("5s", "il y a 16 a"), as before
+        if prefixes.iter().any(|x| if *x == "s" || *x == "a" { u == *x } else { u.starts_with(x) }) {
+            return Some(n * secs);
         }
-    } else if p(&["mo", "mois", "mes", "monat", "maand", "mies"]) {
-        30 * 86400
-    } else if p(&["min"]) {
-        60
-    } else if p(&["sem", "settiman", "woche", "week", "wk", "w", "tydz"]) {
-        7 * 86400
-    } else if p(&["sec", "seg", "sek", "seconde", "secondo"]) || u == "s" {
-        1
-    } else if p(&["h", "heure", "stund", "ora", "ore", "uur", "godz"]) {
-        3600
-    } else if p(&["d", "jour", "j", "tag", "giorn", "dag", "dzie"]) {
-        86400
-    } else if p(&["y", "an", "añ", "jahr", "jaar", "ann", "rok", "lat"]) || u == "a" {
-        365 * 86400
-    } else {
-        return None;
-    };
-    Some(n * secs)
+    }
+    None
 }
 
 #[cfg(test)]
@@ -276,10 +326,82 @@ mod relative_time_tests {
             ("il y a 16 a", 16 * 365 * day),
             ("il y a 2\u{a0}j", 2 * day),
             ("5m", 300),
+            // as YouTube writes them (TV client, Home and Watch later)
+            ("för 20 timmar sedan", 20 * 3600),
+            ("för 4 dagar sedan", 4 * day),
+            ("för 1 år sedan", 365 * day),
+            ("for 20 timer siden", 20 * 3600),
+            ("for 11 dage siden", 11 * day),
+            ("for 4 døgn siden", 4 * day),
+            ("20 часов назад", 20 * 3600),
+            ("4 дня назад", 4 * day),
+            ("11 дней назад", 11 * day),
+            ("2 года назад", 2 * 365 * day),
+            ("6 лет назад", 6 * 365 * day),
+            ("20 годин тому", 20 * 3600),
+            ("4 дні тому", 4 * day),
+            ("1 рік тому", 365 * day),
+            ("6 років тому", 6 * 365 * day),
+            ("20 godzin temu", 20 * 3600),
+            ("1 dzień temu", day),
+            ("2 lata temu", 2 * 365 * day),
+            ("20 saat önce", 20 * 3600),
+            ("4 gün önce", 4 * day),
+            ("2 yıl önce", 2 * 365 * day),
+            ("20 jam yang lalu", 20 * 3600),
+            ("4 hari yang lalu", 4 * day),
+            ("2 minggu yang lalu", 14 * day),
+            ("2 tahun yang lalu", 2 * 365 * day),
+            ("20 時間前", 20 * 3600),
+            ("4 日前", 4 * day),
+            ("1 か月前", 30 * day),
+            ("2 年前", 2 * 365 * day),
+            ("20小时前", 20 * 3600),
+            ("4天前", 4 * day),
+            ("2年前", 2 * 365 * day),
+            ("20시간 전", 20 * 3600),
+            ("4일 전", 4 * day),
+            ("2년 전", 2 * 365 * day),
+            ("20 tuntia sitten", 20 * 3600),
+            ("4 päivää sitten", 4 * day),
+            ("1 vuosi sitten", 365 * day),
+            ("2 vuotta sitten", 2 * 365 * day),
+            ("20 giờ trước", 20 * 3600),
+            ("4 ngày trước", 4 * day),
+            ("2 năm trước", 2 * 365 * day),
+            ("há 20 horas", 20 * 3600),
+            ("há 1 ano", 365 * day),
+            ("před 20 hodinami", 20 * 3600),
+            ("před 4 dny", 4 * day),
+            ("před 1 rokem", 365 * day),
+            ("před 2 lety", 2 * 365 * day),
+            ("20 órával ezelőtt", 20 * 3600),
+            ("4 nappal ezelőtt", 4 * day),
+            ("2 évvel ezelőtt", 2 * 365 * day),
+            ("acum 20 de ore", 20 * 3600),
+            ("acum 4 zile", 4 * day),
+            ("acum 2 ani", 2 * 365 * day),
+            ("πριν από 20 ώρες", 20 * 3600),
+            ("πριν από 4 ημέρες", 4 * day),
+            ("πριν από 2 έτη", 2 * 365 * day),
+            ("قبل 20 ساعة", 20 * 3600),
+            ("قبل 11 يومًا", 11 * day),
+            ("قبل 4 أيام", 4 * day),
+            ("قبل 3 سنوات", 3 * 365 * day),
+            ("20 घंटे पहले", 20 * 3600),
+            ("4 दिन पहले", 4 * day),
+            ("2 वर्ष पहले", 2 * 365 * day),
+            ("20 ชั่วโมงที่ผ่านมา", 20 * 3600),
+            ("4 วันที่ผ่านมา", 4 * day),
+            ("2 ปีที่แล้ว", 2 * 365 * day),
         ] {
             assert_eq!(relative_secs(s), Some(want), "{s}");
         }
-        for s in ["1.2M views", "3 M de vues", "12 k vues", "1,5 Mio. Aufrufe", "450 watching", "Ed Sheeran", "100% DOCS", "21\u{a0}M", "4,8\u{a0}k", "2,5\u{a0}Md", "7,5 k spectateurs"] {
+        for s in ["1.2M views", "3 M de vues", "12 k vues", "1,5 Mio. Aufrufe", "450 watching", "Ed Sheeran", "100% DOCS", "21\u{a0}M", "4,8\u{a0}k", "2,5\u{a0}Md", "7,5 k spectateurs",
+            "108\u{a0}799 visningar", "108 тыс. просмотров", "23 просмотра", "108 тис. переглядів", "108 tys. wyświetleń", "108 B görüntüleme",
+            "108 rb x ditonton", "10万回視聴", "10万次观看", "조회수 10만회", "108 t. katselukertaa", "108k avspillinger", "108 N lượt xem",
+            "108 mil visualizações", "108 tis. zhlédnutí", "108 E megtekintés", "108 K de vizionări", "108 χιλ. προβολές", "108 ألف مشاهدة",
+            "23 हज़ार व्यू", "การดู 1 แสน ครั้ง"] {
             assert_eq!(relative_secs(s), None, "{s}");
         }
     }
@@ -293,23 +415,67 @@ pub fn now() -> i64 {
 }
 
 pub fn relative_from_ts(ts: i64) -> String {
+    use crate::i18n::{self, AppLanguage};
+
     let d = (now() - ts).max(0);
-    let (n, u) = if d < 60 {
-        return "just now".into();
+    let (n, messages, ru, uk) = if d < 60 {
+        return i18n::t("just now").into();
     } else if d < 3600 {
-        (d / 60, "minute")
+        (
+            d / 60,
+            ["{0} minute ago", "{0} minutes ago"],
+            ["минуту", "минуты", "минут"],
+            ["хвилину", "хвилини", "хвилин"],
+        )
     } else if d < 86400 {
-        (d / 3600, "hour")
+        (
+            d / 3600,
+            ["{0} hour ago", "{0} hours ago"],
+            ["час", "часа", "часов"],
+            ["годину", "години", "годин"],
+        )
     } else if d < 7 * 86400 {
-        (d / 86400, "day")
+        (
+            d / 86400,
+            ["{0} day ago", "{0} days ago"],
+            ["день", "дня", "дней"],
+            ["день", "дні", "днів"],
+        )
     } else if d < 30 * 86400 {
-        (d / (7 * 86400), "week")
+        (
+            d / (7 * 86400),
+            ["{0} week ago", "{0} weeks ago"],
+            ["неделю", "недели", "недель"],
+            ["тиждень", "тижні", "тижнів"],
+        )
     } else if d < 365 * 86400 {
-        (d / (30 * 86400), "month")
+        (
+            d / (30 * 86400),
+            ["{0} month ago", "{0} months ago"],
+            ["месяц", "месяца", "месяцев"],
+            ["місяць", "місяці", "місяців"],
+        )
     } else {
-        (d / (365 * 86400), "year")
+        (
+            d / (365 * 86400),
+            ["{0} year ago", "{0} years ago"],
+            ["год", "года", "лет"],
+            ["рік", "роки", "років"],
+        )
     };
-    format!("{n} {u}{} ago", if n == 1 { "" } else { "s" })
+
+    let (forms, suffix) = match i18n::language() {
+        AppLanguage::Russian => (ru, "назад"),
+        AppLanguage::Ukrainian => (uk, "тому"),
+        _ => return i18n::format(messages[usize::from(n != 1)], &[&n]),
+    };
+    let form = match (n % 100, n % 10) {
+        (11..=14, _) => forms[2],
+        (_, 1) => forms[0],
+        (_, 2..=4) => forms[1],
+        _ => forms[2],
+    };
+    format!("{n} {form} {suffix}")
 }
 
 /// "27K", "1.2M", "27,124", "3 likes" -> a number; None without digits.

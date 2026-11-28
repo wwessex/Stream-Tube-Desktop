@@ -1,8 +1,5 @@
 use super::PlayerView;
-use crate::{
-    player::controller,
-    ui::{Pal, app::UiState},
-};
+use crate::{player::controller, ui::Pal};
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px, size};
 
 fn open_player(
@@ -14,7 +11,7 @@ fn open_player(
 ) {
     let player = cx.update(|cx| {
         cx.set_global(Pal::new(true, 0x3ea6ff));
-        cx.set_global(UiState::default());
+        cx.set_global(crate::ui::app::UiState::default());
         controller::init(cx);
         let player = controller::player(cx);
         player.update(cx, |player, _| player.duration = 160.0);
@@ -68,9 +65,10 @@ fn volume_drag_ends_outside_the_track(cx: &mut TestAppContext) {
     let track = view.read_with(cx, |view, _| view.vol_bounds.get());
     assert!(track.size.width > px(0.0));
     let start = point(track.origin.x + track.size.width * 0.25, track.center().y);
+    // above the track: below it is off the bottom of the window
     let release = point(
         track.origin.x + track.size.width * 0.625,
-        track.bottom() + px(12.0),
+        track.top() - px(12.0),
     );
     let after_release = point(start.x, release.y);
     let modifiers = Modifiers::default();

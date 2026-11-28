@@ -8,6 +8,7 @@ pub struct VideoItem {
     pub channel_id: Option<String>,
     pub channel_avatar: Option<String>,
     pub thumbnail: String,
+    pub compact_thumbnail: Option<String>,
     pub duration_text: Option<String>,
     pub duration_secs: Option<u64>,
     pub views_text: Option<String>,
@@ -18,6 +19,9 @@ pub struct VideoItem {
     pub is_live: bool,
     pub is_short: bool,
     pub is_upcoming: bool,
+    /// Set when the card stands for a show (podcast, series): the playlist of its
+    /// episodes, which is what opening the card should show.
+    pub playlist_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -79,6 +83,7 @@ pub struct WatchInfo {
     pub date_text: String,
     pub likes_text: Option<String>,
     pub description: String,
+    pub description_links: Vec<DescriptionLink>,
     pub channel: ChannelItem,
     pub chapters: Vec<Chapter>,
     /// "Most replayed" graph: (start s, duration s, intensity 0..1)
@@ -94,6 +99,12 @@ pub struct WatchInfo {
     pub live_chat: Option<(String, String)>,
     /// When watching in a playlist context.
     pub playlist: Option<WatchPlaylist>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DescriptionLink {
+    pub range: std::ops::Range<usize>,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -122,6 +133,52 @@ pub struct Comment {
     pub emojis: Vec<(String, String)>,
     /// GIF or sticker posted with the comment: (URL, width / height)
     pub image: Option<(String, f32)>,
+    pub(crate) actions: CommentActions,
+    pub(crate) account: Option<std::sync::Arc<()>>,
+}
+
+impl Comment {
+    pub(crate) fn set_reaction(&mut self, reaction: Option<CommentReaction>) {
+        self.actions.reaction = reaction;
+        self.likes = self.actions.like_count().to_owned();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommentReaction {
+    Like,
+    Dislike,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CommentActions {
+    pub like: Vec<String>,
+    pub unlike: Vec<String>,
+    pub dislike: Vec<String>,
+    pub undislike: Vec<String>,
+    pub reply: Option<String>,
+    pub reaction: Option<CommentReaction>,
+    pub unliked_count: String,
+    pub liked_count: String,
+}
+
+impl CommentActions {
+    pub fn toggle(&self, reaction: CommentReaction) -> (Option<CommentReaction>, &[String]) {
+        use CommentReaction::{Dislike, Like};
+
+        let undo = self.reaction == Some(reaction);
+        let actions = match (reaction, undo) {
+            (Like, false) => &self.like,
+            (Like, true) => &self.unlike,
+            (Dislike, false) => &self.dislike,
+            (Dislike, true) => &self.undislike,
+        };
+        ((!undo).then_some(reaction), actions)
+    }
+
+    pub fn like_count(&self) -> &str {
+        if self.reaction == Some(CommentReaction::Like) { &self.liked_count } else { &self.unliked_count }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -131,11 +188,16 @@ pub struct CommentPage {
     pub count_text: Option<String>,
     pub sort_top_token: Option<String>,
     pub sort_new_token: Option<String>,
+    pub(crate) create_params: Option<String>,
+    pub(crate) account: Option<std::sync::Arc<()>>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ChannelTab {
     pub title: String,
+    /// what the tab is, whatever language its title is in: the last part of its
+    /// URL ("featured", "videos", "shorts", "streams", "playlists", …)
+    pub kind: String,
     pub params: Option<String>,
     pub selected: bool,
 }
@@ -146,6 +208,16 @@ pub struct ChannelPage {
     pub banner: Option<String>,
     pub tabs: Vec<ChannelTab>,
     pub page: Page,
+    /// the tab's sort chips (Latest, Popular, Oldest), each with the
+    /// continuation that loads the tab sorted that way
+    pub sort_chips: Vec<SortChip>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SortChip {
+    pub title: String,
+    pub token: String,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -176,6 +248,7 @@ pub struct StreamFormat {
 
 #[derive(Clone, Debug, Default)]
 pub struct CaptionTrack {
+    pub json3_url: Option<String>,
     pub lang: String,
     pub name: String,
     pub url: String,
@@ -229,6 +302,10 @@ pub struct StreamInfo {
     pub audio: Vec<StreamFormat>,
     pub muxed: Vec<StreamFormat>,
     pub captions: Vec<CaptionTrack>,
+    /// Original audio language code detected from stream/HLS/yt-dlp metadata, if available.
+    pub original_language: Option<String>,
+    /// Default caption track index for the original audio track, if reported by YouTube.
+    pub default_caption_index: Option<usize>,
     pub storyboard: Option<Storyboard>,
     pub source: &'static str,
     /// Play `hls_url` (through the proxy); `video` then only lists the HLS

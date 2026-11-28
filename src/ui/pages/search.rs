@@ -1,19 +1,48 @@
 use crate::api::innertube::{self, SearchFilter};
 use crate::api::types::*;
+use crate::i18n::t;
 use crate::store;
 use crate::ui::cards::*;
 use crate::ui::widgets::*;
 use crate::ui::*;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 pub struct SearchPage {
     query: String,
     filter: SearchFilter,
     show_filters: bool,
-    items: Load<Vec<Item>>,
+    items: Load<Arc<Vec<Item>>>,
     continuation: Option<String>,
     loading_more: bool,
-    scroll: ScrollHandle,
+    more_failed: bool,
+    last_load_more_top: usize,
+    scroll: ListState,
+    rows: Arc<Vec<SearchRow>>,
+    rows_settings: Option<Arc<store::Settings>>,
+    row_geometry: (Pixels, Pixels),
     serial: u64,
+}
+
+#[derive(PartialEq)]
+enum SearchRow {
+    Result(usize),
+    Shorts(Vec<usize>),
+    Empty,
+    More,
+}
+
+fn append_results(items: &mut Vec<Item>, incoming: Vec<Item>) {
+    let key = |item: &Item| {
+        let id = match item {
+            Item::Video(video) => &video.id,
+            Item::Channel(channel) => &channel.id,
+            Item::Playlist(playlist) => &playlist.id,
+        };
+        (std::mem::discriminant(item), id.clone())
+    };
+    let mut seen: HashSet<_> = items.iter().map(key).collect();
+    items.extend(incoming.into_iter().filter(|item| seen.insert(key(item))));
 }
 
 impl SearchPage {
@@ -25,7 +54,12 @@ impl SearchPage {
             items: Load::Loading,
             continuation: None,
             loading_more: false,
-            scroll: ScrollHandle::new(),
+            more_failed: false,
+            last_load_more_top: 0,
+            scroll: ListState::new(0, ListAlignment::Top, px(240.)),
+            rows: Arc::default(),
+            rows_settings: None,
+            row_geometry: (px(0.), px(0.)),
             serial: 0,
         };
         s.load(cx);
@@ -34,6 +68,13 @@ impl SearchPage {
 
     fn load(&mut self, cx: &mut Context<Self>) {
         self.items = Load::Loading;
+        self.continuation = None;
+        self.loading_more = false;
+        self.more_failed = false;
+        self.last_load_more_top = 0;
+        self.scroll.reset(0);
+        self.rows = Arc::default();
+        self.rows_settings = None;
         self.serial += 1;
         let serial = self.serial;
         let (q, f) = (self.query.clone(), self.filter);
@@ -45,7 +86,9 @@ impl SearchPage {
                 }
                 match res {
                     Ok(p) => {
-                        this.items = Load::Ready(p.items);
+                        let mut items = Vec::new();
+                        append_results(&mut items, p.items);
+                        this.items = Load::Ready(Arc::new(items));
                         this.continuation = p.continuation;
                     }
                     Err(e) => this.items = Load::Error(e.to_string()),
@@ -58,28 +101,84 @@ impl SearchPage {
     }
 
     fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.loading_more {
+            return;
+        }
         let Some(tok) = self.continuation.clone() else {
-            self.loading_more = false;
             return;
         };
+        self.loading_more = true;
+        self.more_failed = false;
+        self.last_load_more_top = self.scroll.logical_scroll_top().item_ix;
+        let serial = self.serial;
         cx.spawn(async move |this, cx| {
             let res = blocking(move || innertube::search_continue(&tok)).await;
             let _ = this.update(cx, |this, cx| {
+                if this.serial != serial {
+                    return;
+                }
                 this.loading_more = false;
                 match res {
                     Ok(p) => {
                         if let Some(items) = this.items.ready_mut() {
-                            let seen: std::collections::HashSet<String> = items.iter().filter_map(|i| i.as_video().map(|v| v.id.clone())).collect();
-                            items.extend(p.items.into_iter().filter(|i| i.as_video().map(|v| !seen.contains(&v.id)).unwrap_or(true)));
+                            append_results(Arc::make_mut(items), p.items);
                         }
-                        this.continuation = p.continuation;
+                        this.continuation = p.continuation.filter(|next| this.continuation.as_ref() != Some(next));
+                        this.rows_settings = None;
                     }
-                    Err(_) => this.continuation = None,
+                    Err(_) => this.more_failed = true,
                 }
                 cx.notify();
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn sync_rows(&mut self, settings: &Arc<store::Settings>) -> bool {
+        let Some(items) = self.items.ready() else {
+            return false;
+        };
+        if self.rows_settings.as_ref().is_some_and(|current| Arc::ptr_eq(current, settings)) {
+            return false;
+        }
+
+        let mut rows = Vec::new();
+        let mut shorts = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            match item {
+                Item::Video(video) if store::is_filtered(video, settings) => {}
+                Item::Video(video) if video.is_short => {
+                    if shorts.len() < 6 {
+                        shorts.push(index);
+                    }
+                }
+                _ => rows.push(SearchRow::Result(index)),
+            }
+        }
+        if !shorts.is_empty() {
+            rows.push(SearchRow::Shorts(shorts));
+        }
+        if self.continuation.is_some() {
+            rows.push(SearchRow::More);
+        } else if rows.is_empty() {
+            rows.push(SearchRow::Empty);
+        }
+        self.rows_settings = Some(settings.clone());
+        if self.rows.as_ref() == &rows {
+            return false;
+        }
+
+        let old_count = self.rows.len();
+        let shared = old_count.min(rows.len());
+        if old_count != rows.len() {
+            self.scroll.splice(shared..old_count, rows.len() - shared);
+        }
+        if let Some(first_changed) = self.rows.iter().zip(&rows).position(|(old, new)| old != new) {
+            self.scroll.remeasure_items(first_changed..shared);
+        }
+        self.rows = Arc::new(rows);
+        true
     }
 
     fn filter_group(&self, title: &str, options: &[(&str, u8)], current: u8, set: fn(&mut SearchFilter, u8), cx: &mut Context<Self>) -> Div {
@@ -89,7 +188,7 @@ impl SearchPage {
             .flex_col()
             .flex_1()
             .min_w(px(150.))
-            .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child(title.to_uppercase()));
+            .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child(t(title).to_uppercase()));
         for (label, v) in options {
             let v = *v;
             let active = current == v && v != 0;
@@ -102,7 +201,7 @@ impl SearchPage {
                     .text_color(if active { p.text } else { p.text2 })
                     .when(active, |d| d.font_weight(FontWeight::BOLD))
                     .hover(move |s| s.text_color(p.text))
-                    .child(label.to_string())
+                    .child(t(label).to_string())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let cur = current;
                         set(&mut this.filter, if cur == v { 0 } else { v });
@@ -123,7 +222,7 @@ impl SearchPage {
             .text_color(if on { p.text } else { p.text2 })
             .when(on, |d| d.font_weight(FontWeight::BOLD))
             .hover(move |s| s.text_color(p.text))
-            .child(label.to_string())
+            .child(t(label).to_string())
             .on_click(cx.listener(move |this, _, _, cx| {
                 toggle(&mut this.filter);
                 this.load(cx);
@@ -132,23 +231,50 @@ impl SearchPage {
 }
 
 impl Render for SearchPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
-        let s = store::settings_snapshot();
-        let has_more = self.continuation.is_some();
-        maybe_load_more(&self.scroll, &mut self.loading_more, has_more, cx, |this, cx| this.load_more(cx));
-        let width = content_width(cx).min(px(1280.));
-        let thumb_w = if width < px(900.) { px(240.) } else { px(360.) };
+        let available = content_width(cx);
+        let width = available.min(px(1280.));
+        let thumb_w = if width < px(900.) { px(240.).min(width * 0.45) } else { px(360.) };
+        let rows_changed = self.sync_rows(&store::settings_snapshot());
+        let geometry = (available, window.rem_size());
+        let resized = self.row_geometry != geometry;
+        self.row_geometry = geometry;
+        // A page with no new visible rows must wait for scroll progress before fetching again.
+        let scrolled = self.scroll.logical_scroll_top().item_ix > self.last_load_more_top;
+        if resized {
+            self.scroll.remeasure();
+        }
+        if rows_changed || resized {
+            // Seed heights after GPUI lays out the resized list, so the scrollbar
+            // can reach results that have not been mounted yet.
+            let scroll = self.scroll.clone();
+            let entity = cx.entity_id();
+            let estimate = thumb_w * (9. / 16.) + geometry.1;
+            window.on_next_frame(move |_, cx| {
+                scroll.with_uniform_item_height(estimate);
+                cx.notify(entity);
+            });
+        } else if self.continuation.is_some()
+            && !self.loading_more
+            && !self.more_failed
+            && scrolled
+            && near_bottom(&self.scroll, 900.0)
+        {
+            cx.defer_in_entity(Self::load_more);
+        }
         let f = self.filter;
         let header = div()
             .flex()
+            .flex_wrap()
+            .gap_2()
             .items_center()
             .justify_between()
             .pb_2()
             .child(
-                div().flex().gap_2().children(
+                div().flex().flex_wrap().gap_2().children(
                     [("All", 0u8), ("Videos", 1), ("Channels", 2), ("Playlists", 3), ("Movies", 4)].into_iter().map(|(l, k)| {
-                        chip(SharedString::from(format!("t-{l}")), l, f.kind == k, cx).on_click(cx.listener(move |this, _, _, cx| {
+                        chip(SharedString::from(format!("t-{l}")), t(l), f.kind == k, cx).on_click(cx.listener(move |this, _, _, cx| {
                             this.filter.kind = k;
                             this.load(cx);
                         }))
@@ -156,7 +282,7 @@ impl Render for SearchPage {
                 ),
             )
             .child(
-                pill("filters", Some("sliders-horizontal"), if f.is_default() { "Filters".to_string() } else { "Filters •".to_string() }, cx).on_click(
+                pill("filters", Some("sliders-horizontal"), if f.is_default() { "Filters" } else { "Filters (active)" }, cx).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.show_filters ^= true;
                         cx.notify();
@@ -166,6 +292,7 @@ impl Render for SearchPage {
         let filters = self.show_filters.then(|| {
             div()
                 .flex()
+                .flex_wrap()
                 .gap_6()
                 .p_4()
                 .mb_4()
@@ -180,7 +307,7 @@ impl Render for SearchPage {
                         .flex_col()
                         .flex_1()
                         .min_w(px(150.))
-                        .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child("FEATURES"))
+                        .child(div().pb_3().mb_2().border_b_1().border_color(p.border).text_xs().font_weight(FontWeight::BOLD).text_color(p.text).child(t("FEATURES")))
                         .child(self.feature("Live", f.live, |f| f.live ^= true, cx))
                         .child(self.feature("4K", f.four_k, |f| f.four_k ^= true, cx))
                         .child(self.feature("HD", f.hd, |f| f.hd ^= true, cx))
@@ -190,24 +317,31 @@ impl Render for SearchPage {
                 )
                 .child(self.filter_group("Sort by", &[("Relevance", 0), ("Upload date", 2), ("View count", 3), ("Rating", 1)], f.sort, |f, v| f.sort = v, cx))
         });
-        let body: AnyElement = match &self.items {
+        let controls = div()
+            .id("search-controls")
+            .flex_none()
+            .max_h(relative(0.65))
+            .overflow_y_scroll()
+            .px_6()
+            .pt_4()
+            .child(div().flex().justify_center().child(div().w(width).child(header).children(filters)));
+        let body = match &self.items {
             Load::Loading => spinner(cx).into_any_element(),
             Load::Error(e) => error_state(e, cx).into_any_element(),
             Load::Ready(items) => {
-                let mut col = div().flex().flex_col().gap_4();
-                let mut shorts = Vec::new();
-                for it in items {
-                    match it {
-                        Item::Video(v) if store::is_filtered(v, &s) => {}
-                        Item::Video(v) if v.is_short => shorts.push(v.clone()),
-                        Item::Video(v) => col = col.child(video_row(v, thumb_w, cx)),
-                        Item::Channel(c) => col = col.child(channel_row(c, cx)),
-                        Item::Playlist(pl) => col = col.child(playlist_row(pl, cx)),
-                    }
-                }
-                if !shorts.is_empty() && !s.hide_shorts {
-                    col = col.child(
-                        div()
+                let items = items.clone();
+                let rows = self.rows.clone();
+                let page = cx.entity().downgrade();
+                let loading_more = self.loading_more;
+                let more_failed = self.more_failed;
+                list(self.scroll.clone(), move |index, _, cx| {
+                    let element = match &rows[index] {
+                        SearchRow::Result(item) => match &items[*item] {
+                            Item::Video(video) => video_row(video, thumb_w, cx),
+                            Item::Channel(channel) => channel_row(channel, thumb_w, cx),
+                            Item::Playlist(playlist) => playlist_row(playlist, thumb_w, cx),
+                        },
+                        SearchRow::Shorts(indices) => div()
                             .flex()
                             .flex_col()
                             .gap_3()
@@ -216,26 +350,52 @@ impl Render for SearchPage {
                             .border_b_1()
                             .border_color(p.border)
                             .child(div().flex().items_center().gap_2().child(icon("zap").text_color(p.accent)).child(section_title("Shorts", cx)))
-                            .child(div().flex().gap_4().overflow_hidden().children(shorts.iter().take(6).map(|v| shorts_card(v, px(190.), cx)))),
-                    );
-                }
-                if items.is_empty() {
-                    col = col.child(empty_state("search-x", "No results found", "Try different keywords or remove filters", cx));
-                }
-                if self.loading_more {
-                    col = col.child(spinner(cx));
-                }
-                col.into_any_element()
+                            .child(div().flex().gap_4().overflow_hidden().children(
+                                indices.iter().filter_map(|&index| items[index].as_video()).map(|video| shorts_card(video, px(190.), cx)),
+                            ))
+                            .into_any_element(),
+                        SearchRow::Empty => empty_state("search-x", "No results found", t("Try different keywords or remove filters"), cx).into_any_element(),
+                        SearchRow::More if loading_more => spinner(cx).into_any_element(),
+                        SearchRow::More => {
+                            let page = page.clone();
+                            let label = if more_failed { "Retry" } else { "Show more" };
+                            div().flex().justify_center().py_4().child(
+                                pill("search-more", None, label, cx)
+                                    .tab_index(0)
+                                    .focus(move |style| style.bg(p.hover))
+                                    .on_click(move |_, _, cx| {
+                                        let _ = page.update(cx, Self::load_more);
+                                    }),
+                            ).into_any_element()
+                        }
+                    };
+                    div().flex().justify_center().child(div().w(width).pb_4().child(element)).into_any_element()
+                })
+                .absolute()
+                .inset_0()
+                .px_6()
+                .pb_24()
+                .into_any_element()
             }
         };
-        page_scroll("search-scroll", &self.scroll).child(
-            div()
-                .flex()
-                .justify_center()
-                .px_6()
-                .pt_4()
-                .pb_24()
-                .child(div().w(width).flex().flex_col().child(header).children(filters).child(body)),
+        div().size_full().flex().flex_col().child(controls).child(
+            div().relative().flex_1().min_h_0().child(scroll_viewport("search-scroll", &self.scroll, body, window, cx)),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_results;
+    use crate::api::types::{Item, VideoItem};
+
+    #[test]
+    fn keeps_search_rank_when_pages_repeat_results() {
+        let video = |id: &str| Item::Video(VideoItem { id: id.into(), ..Default::default() });
+        let mut results = vec![video("first")];
+
+        append_results(&mut results, vec![video("first"), video("new"), video("new"), video("last")]);
+
+        assert_eq!(results, [video("first"), video("new"), video("last")]);
     }
 }

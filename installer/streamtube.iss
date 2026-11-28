@@ -1,9 +1,9 @@
 ; Stream Tube installer (Inno Setup 6)
-; Build:  ISCC.exe /DAppVersion=0.7.2-alpha installer\streamtube.iss
+; Build:  ISCC.exe /DAppVersion=1.0.0 installer\streamtube.iss
 ; Needs a release build in target\release and libmpv-2.dll in third_party\mpv.
 
 #ifndef AppVersion
-  #define AppVersion "0.7.2-alpha"
+  #define AppVersion "1.0.0"
 #endif
 #define AppName "Stream Tube"
 #define AppExe "streamtube.exe"
@@ -29,6 +29,8 @@ OutputBaseFilename=StreamTube-{#AppVersion}-setup
 SetupIconFile={#Root}\assets\streamtube.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
+Uninstallable=not IsPortableUpdate
+CreateUninstallRegKey=not IsPortableUpdate
 LicenseFile={#Root}\LICENSE
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -52,22 +54,45 @@ Source: "{#Root}\third_party\mpv\libmpv-2.dll"; DestDir: "{app}"; Flags: ignorev
 Source: "{#Root}\third_party\vulkan\vulkan-1.dll"; DestDir: "{app}\vulkan"; Flags: ignoreversion
 Source: "{#Root}\third_party\vulkan\LICENSE.txt"; DestDir: "{app}\vulkan"; Flags: ignoreversion
 Source: "{#Root}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "{#Root}\README.md"; DestDir: "{app}"; Flags: ignoreversion; Check: IsPortableUpdate
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
-Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"; Check: not IsPortableUpdate
+Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"; Check: not IsPortableUpdate
+Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon; Check: not IsPortableUpdate
 
 [Registry]
 ; streamtube:// links (used by the browser userscript) open the app
-Root: HKCU; Subkey: "Software\Classes\streamtube"; ValueType: string; ValueName: ""; ValueData: "URL:Stream Tube"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\streamtube"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\streamtube\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
-Root: HKCU; Subkey: "Software\Classes\streamtube\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\streamtube"; ValueType: string; ValueName: ""; ValueData: "URL:Stream Tube"; Flags: uninsdeletekey; Check: not IsPortableUpdate
+Root: HKCU; Subkey: "Software\Classes\streamtube"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Check: not IsPortableUpdate
+Root: HKCU; Subkey: "Software\Classes\streamtube\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"; Check: not IsPortableUpdate
+Root: HKCU; Subkey: "Software\Classes\streamtube\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""; Check: not IsPortableUpdate
 
 [Run]
 ; also runs after a silent in-app update, so the app comes back by itself
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall
+Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall runascurrentuser
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function IsPortableUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:PORTABLEUPDATE|0}') = '1';
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  AppDir: String;
+begin
+  Result := '';
+  if not IsPortableUpdate then
+    Exit;
+
+  AppDir := AddBackslash(ExpandConstant('{app}'));
+  if (ExpandConstant('{param:DIR|}') = '') or
+     not FileExists(AppDir + '{#AppExe}') or
+     not FileExists(AppDir + 'libmpv-2.dll') or
+     (not FileExists(AppDir + 'streamtube.portable') and not FileExists(AppDir + 'README.md')) then
+    Result := 'Select the folder containing your extracted Stream Tube portable copy.';
+end;

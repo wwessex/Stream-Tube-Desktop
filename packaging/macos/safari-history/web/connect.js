@@ -5,11 +5,13 @@ const authCookies = new Set([
     "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
     "__Secure-1PSIDTS", "__Secure-3PSIDTS", "__Secure-1PSIDCC", "__Secure-3PSIDCC",
 ]);
-const connect = document.getElementById("connect");
+const button = document.getElementById("connect");
 const status = document.getElementById("status");
 
-connect.addEventListener("click", async () => {
-    connect.disabled = true;
+button.addEventListener("click", connect);
+
+async function connect() {
+    button.disabled = true;
     status.textContent = "Checking access to YouTube…";
     try {
         if (!await browser.permissions.contains(site)) {
@@ -41,7 +43,7 @@ connect.addEventListener("click", async () => {
         status.textContent = "Waiting for Stream Tube…";
         const request = await browser.runtime.sendMessage({ type: "watch-history-request" });
         if (!request) {
-            status.textContent = "Choose Use Safari in Stream Tube’s watch history settings and try again.";
+            status.textContent = "Start a Safari connection in the matching Stream Tube build and try again.";
             return;
         }
         const reply = await browser.runtime.sendNativeMessage(
@@ -53,6 +55,6 @@ connect.addEventListener("click", async () => {
     } catch {
         status.textContent = "Safari couldn’t connect. Check the extension’s access to YouTube and try again.";
     } finally {
-        connect.disabled = false;
+        button.disabled = false;
     }
-});
+}

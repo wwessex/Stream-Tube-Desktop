@@ -32,6 +32,7 @@ pub struct Preview {
 }
 
 pub enum PreviewEvent {
+    TargetChanged,
     Changed,
 }
 
@@ -94,8 +95,9 @@ pub fn hover(id: &str, hovered: bool, cx: &mut App) {
         p.serial += 1;
         if p.id.as_deref() != Some(id.as_str()) {
             p.clear(cx);
+            p.id = Some(id.clone());
+            cx.emit(PreviewEvent::TargetChanged);
         }
-        p.id = Some(id.clone());
         p.serial
     });
     // wait for the pointer to rest, then resolve streams and start
@@ -204,7 +206,7 @@ impl Preview {
             ("osc", "no"),
             ("osd-level", "0"),
             ("cache", "yes"),
-            ("demuxer-max-bytes", "24MiB"),
+            ("demuxer-max-bytes", "12MiB"),
             ("network-timeout", "15"),
             ("hls-bitrate", "min"),
             ("user-agent", ua),
@@ -268,7 +270,9 @@ impl Preview {
         let Some(src) = src else { return };
         let Some(m) = self.ensure_mpv(cx) else { return };
         self.ready = false;
-        let _ = m.command(&["loadfile", &src, "replace", "-1", "pause=no"]);
+        // The loadfile options moved from the third to the fourth argument in mpv 0.38.
+        let _ = m.command(&["loadfile", &src, "replace", "-1", "pause=no"])
+            .or_else(|_| m.command(&["loadfile", &src, "replace", "pause=no"]));
     }
 
     fn on_frame(&mut self, cx: &mut Context<Self>) {
@@ -347,7 +351,7 @@ impl Render for PreviewView {
         let fade_id = SharedString::from(format!("preview-in-{}", self.preview.read(cx).id.clone().unwrap_or_default()));
         let el = div().id("preview").group("preview").relative().size_full().rounded(radius).overflow_hidden().when_some(frame, |d, f| {
             d.bg(black())
-                .child(img(ImageSource::Render(f)).size_full().object_fit(ObjectFit::Cover))
+                .child(img(ImageSource::Render(f)).size_full().rounded(radius).object_fit(ObjectFit::Cover))
                 // time left, bottom right (like the duration badge it covers)
                 .when(dur > 0.0, |d| {
                     d.child(

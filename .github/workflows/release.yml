@@ -5,7 +5,7 @@ name: Release
 # for each file. Publishing the draft is left to a maintainer; once published,
 # immutable releases keep the files from being changed.
 #
-# Start it by pushing a version tag (git tag v0.7.2-alpha && git push origin v0.7.2-alpha)
+# Start it by pushing a version tag (git tag v1.0.0 && git push origin v1.0.0)
 # or from the Actions tab, choosing the tag under "Use workflow from".
 
 on:

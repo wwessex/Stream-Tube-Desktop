@@ -1,5 +1,6 @@
 //! Google account sign-in using YouTube's TV device flow (the same method SmartTube
-//! uses): the app shows a code, the user enters it at google.com/device, and the
+//! uses). The app opens youtube.com/activate in the default browser with the code
+//! already filled in, so the user only picks an account and allows access. The
 //! resulting token authorizes the TV Innertube client for the personal home feed,
 //! subscriptions, likes and watch history.
 use super::http;
@@ -9,12 +10,17 @@ use anyhow::{Result, anyhow};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
+use url::Url;
 
 // Public OAuth client of the YouTube TV app.
 const CLIENT_ID: &str = "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com";
 const CLIENT_SECRET: &str = "SboVhoG9s0rNafixCSGGKXAT";
 const SCOPE: &str = "http://gdata.youtube.com https://www.googleapis.com/auth/youtube-paid-content";
 const TV_VERSION: &str = "7.20251120.13.00";
+// YouTube's own activation page. Unlike google.com/device it also lets the user
+// pick a brand account (a channel).
+const ACTIVATE_URL: &str = "https://www.youtube.com/activate";
 const TV_UA: &str = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -30,20 +36,48 @@ struct Stored {
     refresh_token: String,
     expires_at: i64,
     account: Option<Account>,
+    #[serde(skip)]
+    session: Arc<()>,
+    #[serde(default)]
+    history_key: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,
-    pub verification_url: String,
     pub interval: u64,
     pub expires_in: u64,
 }
 
+impl DeviceCode {
+    /// The activation page with the code filled in.
+    pub fn sign_in_url(&self) -> Url {
+        sign_in_url(&self.user_code)
+    }
+
+    /// Where to enter the code by hand, for another device.
+    pub fn manual_url() -> &'static str {
+        ACTIVATE_URL.trim_start_matches("https://www.")
+    }
+}
+
+fn sign_in_url(user_code: &str) -> Url {
+    let mut url = Url::parse(ACTIVATE_URL).expect("valid activation URL");
+    url.query_pairs_mut().append_pair("user_code", user_code);
+    url
+}
+
 fn state() -> &'static Mutex<Option<Stored>> {
     static S: std::sync::OnceLock<Mutex<Option<Stored>>> = std::sync::OnceLock::new();
-    S.get_or_init(|| Mutex::new(crate::store::kv_get("auth").and_then(|s| serde_json::from_str(&s).ok())))
+    S.get_or_init(|| {
+        let mut stored: Option<Stored> = crate::store::kv_get("auth").and_then(|s| serde_json::from_str(&s).ok());
+        if let Some(s) = stored.as_mut().filter(|s| s.history_key.is_none()) {
+            s.history_key = Some(rand::random());
+            persist(&stored);
+        }
+        Mutex::new(stored)
+    })
 }
 
 fn persist(s: &Option<Stored>) {
@@ -57,6 +91,18 @@ pub fn signed_in() -> bool {
     state().lock().as_ref().map(|s| !s.refresh_token.is_empty()).unwrap_or(false)
 }
 
+pub(crate) fn session_identity() -> Option<Arc<()>> {
+    state()
+        .lock()
+        .as_ref()
+        .filter(|s| !s.refresh_token.is_empty())
+        .map(|s| s.session.clone())
+}
+
+pub(crate) fn is_current_session(session: &Arc<()>) -> bool {
+    session_identity().is_some_and(|current| Arc::ptr_eq(&current, session))
+}
+
 pub fn account() -> Option<Account> {
     state().lock().as_ref().and_then(|s| s.account.clone())
 }
@@ -65,13 +111,26 @@ pub fn sign_out() {
     let mut s = state().lock();
     *s = None;
     persist(&s);
+    crate::api::streams::clear_cache();
 }
 
 fn oauth_post(url: &str, body: Value) -> Result<(u16, Value)> {
     http::post_json_status(url, &body, &[("User-Agent", TV_UA)])
 }
 
-/// Step 1: get a code for the user to enter at google.com/device.
+#[cfg(test)]
+mod sign_in_url_tests {
+    use super::{DeviceCode, sign_in_url};
+
+    #[test]
+    fn opens_the_activation_page_with_the_code_filled_in() {
+        assert_eq!(sign_in_url("HDZ-QKX-JSMD").as_str(), "https://www.youtube.com/activate?user_code=HDZ-QKX-JSMD");
+        assert_eq!(sign_in_url("A&B C").as_str(), "https://www.youtube.com/activate?user_code=A%26B+C");
+        assert_eq!(DeviceCode::manual_url(), "youtube.com/activate");
+    }
+}
+
+/// Step 1: get a code for the user to approve at youtube.com/activate.
 pub fn start_login() -> Result<DeviceCode> {
     let device_id: String = {
         use rand::Rng;
@@ -86,7 +145,6 @@ pub fn start_login() -> Result<DeviceCode> {
     Ok(DeviceCode {
         device_code: s("device_code").ok_or_else(|| anyhow!("no device code"))?,
         user_code: s("user_code").ok_or_else(|| anyhow!("no user code"))?,
-        verification_url: s("verification_url").unwrap_or_else(|| "https://www.google.com/device".into()),
         interval: v.get("interval").and_then(Value::as_u64).unwrap_or(5),
         expires_in: v.get("expires_in").and_then(Value::as_u64).unwrap_or(1800),
     })
@@ -95,10 +153,35 @@ pub fn start_login() -> Result<DeviceCode> {
 pub enum PollResult {
     Pending,
     SlowDown,
-    Done(Account),
+    Approved(LoginGrant),
 }
 
-/// Step 2: poll until the user has approved the code.
+pub struct LoginGrant {
+    access_token: String,
+    refresh_token: String,
+    expires_at: i64,
+    account: Account,
+}
+
+impl LoginGrant {
+    /// Activate only after the caller confirms this sign-in attempt is still open.
+    pub fn activate(self) -> Account {
+        let mut active = state().lock();
+        *active = Some(Stored {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            expires_at: self.expires_at,
+            account: Some(self.account.clone()),
+            session: Arc::new(()),
+            history_key: Some(rand::random()),
+        });
+        persist(&active);
+        crate::api::streams::clear_cache();
+        self.account
+    }
+}
+
+/// Step 2: poll until the user has approved the code. The grant stays inactive until accepted by the app.
 pub fn poll_login(dc: &DeviceCode) -> Result<PollResult> {
     let (_, v) = oauth_post(
         "https://www.youtube.com/o/oauth2/token",
@@ -117,32 +200,29 @@ pub fn poll_login(dc: &DeviceCode) -> Result<PollResult> {
         };
     }
     let access = v.get("access_token").and_then(Value::as_str).ok_or_else(|| anyhow!("no access token"))?;
-    let refresh = v.get("refresh_token").and_then(Value::as_str).unwrap_or("");
+    let refresh = v
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow!("Sign-in failed: no refresh token"))?;
     let expires = v.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
-    {
-        let mut s = state().lock();
-        *s = Some(Stored {
-            access_token: access.to_string(),
-            refresh_token: refresh.to_string(),
-            expires_at: crate::api::json::now() + expires - 60,
-            account: None,
-        });
-        persist(&s);
-    }
-    let acc = fetch_account().unwrap_or_else(|_| Account { name: "YouTube account".into(), ..Default::default() });
-    {
-        let mut s = state().lock();
-        if let Some(st) = s.as_mut() {
-            st.account = Some(acc.clone());
-        }
-        persist(&s);
-    }
-    Ok(PollResult::Done(acc))
+    let expires_at = crate::api::json::now() + expires - 60;
+    let account = fetch_account(access).unwrap_or_else(|_| Account { name: "YouTube account".into(), ..Default::default() });
+    Ok(PollResult::Approved(LoginGrant {
+        access_token: access.to_string(),
+        refresh_token: refresh.to_string(),
+        expires_at,
+        account,
+    }))
 }
 
 /// A valid access token, refreshed when needed.
 pub fn access_token() -> Option<String> {
     let cur = state().lock().clone()?;
+    access_token_for(cur)
+}
+
+fn access_token_for(cur: Stored) -> Option<String> {
     if cur.expires_at > crate::api::json::now() && !cur.access_token.is_empty() {
         return Some(cur.access_token);
     }
@@ -157,16 +237,19 @@ pub fn access_token() -> Option<String> {
     if let Some(tok) = v.get("access_token").and_then(Value::as_str) {
         let exp = v.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
         let mut s = state().lock();
-        if let Some(st) = s.as_mut() {
-            st.access_token = tok.to_string();
-            st.expires_at = crate::api::json::now() + exp - 60;
-        }
+        let st = s.as_mut().filter(|st| Arc::ptr_eq(&st.session, &cur.session))?;
+        st.access_token = tok.to_string();
+        st.expires_at = crate::api::json::now() + exp - 60;
         persist(&s);
         return Some(tok.to_string());
     }
     // the grant was revoked from the Google account page
     if status == 400 || status == 401 {
-        sign_out();
+        let mut s = state().lock();
+        if s.as_ref().is_some_and(|st| Arc::ptr_eq(&st.session, &cur.session)) {
+            *s = None;
+            persist(&s);
+        }
     }
     None
 }
@@ -177,8 +260,18 @@ fn tv_context() -> Value {
 }
 
 /// Authorized call to the TV Innertube client.
-pub fn tv_call(endpoint: &str, mut body: Value) -> Result<Value> {
+pub fn tv_call(endpoint: &str, body: Value) -> Result<Value> {
+    tv_call_for_session(endpoint, body, None)
+}
+
+fn tv_call_for_session(endpoint: &str, mut body: Value, session: Option<&Arc<()>>) -> Result<Value> {
+    anyhow::ensure!(session.is_none_or(is_current_session), "YouTube account changed");
     let token = access_token().ok_or_else(|| anyhow!("not signed in"))?;
+    anyhow::ensure!(session.is_none_or(is_current_session), "YouTube account changed");
+    tv_call_with(&token, endpoint, body)
+}
+
+fn tv_call_with(token: &str, endpoint: &str, mut body: Value) -> Result<Value> {
     body["context"] = tv_context();
     let auth = format!("Bearer {token}");
     http::post_json(
@@ -194,8 +287,38 @@ pub fn tv_call(endpoint: &str, mut body: Value) -> Result<Value> {
     )
 }
 
-fn fetch_account() -> Result<Account> {
-    let r = tv_call("account/accounts_list", json!({ "accountReadMask": { "returnOwner": true } }))?;
+#[derive(Clone)]
+pub(super) struct HistorySession {
+    identity: Arc<()>,
+    pub(super) key: u64,
+}
+
+impl HistorySession {
+    pub(super) fn current() -> Option<Self> {
+        let active = state().lock();
+        let s = active.as_ref().filter(|s| !s.refresh_token.is_empty())?;
+        Some(Self { identity: s.session.clone(), key: s.history_key? })
+    }
+
+    pub(super) fn if_current<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        let active = state().lock();
+        active.as_ref().filter(|s| Arc::ptr_eq(&s.session, &self.identity)).map(|_| f())
+    }
+
+    pub(super) fn access_token(&self) -> Result<String> {
+        let session = state().lock().as_ref().filter(|s| Arc::ptr_eq(&s.session, &self.identity)).cloned();
+        session.and_then(access_token_for).ok_or_else(|| anyhow!("not signed in"))
+    }
+
+    pub(super) fn call(&self, endpoint: &str, body: Value) -> Result<Value> {
+        let token = self.access_token()?;
+        anyhow::ensure!(self.if_current(|| ()).is_some(), "YouTube history account changed");
+        tv_call_with(&token, endpoint, body)
+    }
+}
+
+fn fetch_account(token: &str) -> Result<Account> {
+    let r = tv_call_with(token, "account/accounts_list", json!({ "accountReadMask": { "returnOwner": true } }))?;
     let item = crate::api::json::find(&r, "accountItem").or_else(|| crate::api::json::find(&r, "accountItemRenderer")).unwrap_or(&r);
     let name = item
         .get("accountName")
@@ -331,66 +454,15 @@ pub fn home() -> Result<Page> {
     Ok(videos(collect_items(&r)))
 }
 
-/// The signed-in account's YouTube watch history (newest first).
-pub fn history() -> Result<Page> {
-    let r = tv_call("browse", json!({ "browseId": "FEhistory" }))?;
-    harvest_removal_tokens(&r);
-    Ok(videos(collect_items(&r)))
-}
-
-/// video id -> feedback token of its "Remove from watch history" menu item
-fn removal_tokens() -> &'static Mutex<std::collections::HashMap<String, String>> {
-    static T: std::sync::OnceLock<Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
-    T.get_or_init(Default::default)
-}
-
-/// Remembers the removal tokens of every history tile in a browse response.
-fn harvest_removal_tokens(r: &Value) {
-    fn token_in(v: &Value) -> Option<String> {
-        match v {
-            Value::Object(m) => {
-                if let Some(item) = m.get("menuServiceItemRenderer") {
-                    let text = item.pointer("/text/runs/0/text").and_then(Value::as_str).unwrap_or("").to_lowercase();
-                    if let Some(t) = item.pointer("/serviceEndpoint/feedbackEndpoint/feedbackToken").and_then(Value::as_str) {
-                        if text.contains("history") || text.contains("remove") {
-                            return Some(t.to_string());
-                        }
-                    }
-                }
-                m.values().find_map(token_in)
-            }
-            Value::Array(a) => a.iter().find_map(token_in),
-            _ => None,
-        }
-    }
-    fn walk(v: &Value, out: &mut Vec<(String, String)>) {
-        match v {
-            Value::Object(m) => {
-                if let Some(tile) = m.get("tileRenderer") {
-                    let id = tile.pointer("/onSelectCommand/watchEndpoint/videoId").and_then(Value::as_str);
-                    if let (Some(id), Some(t)) = (id, token_in(tile)) {
-                        out.push((id.to_string(), t));
-                    }
-                    return;
-                }
-                m.values().for_each(|x| walk(x, out));
-            }
-            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    walk(r, &mut out);
-    if !out.is_empty() {
-        removal_tokens().lock().extend(out);
-    }
-}
-
 /// Brings the account's recent searches (made on the phone, TV or web) into the
 /// local search history. YouTube offers them as the suggestions for an empty
 /// query when the request is signed in; signed out the list is empty.
 pub fn sync_search_history() -> Result<usize> {
-    let token = access_token().ok_or_else(|| anyhow!("not signed in"))?;
+    if !crate::store::settings_snapshot().search_history_enabled {
+        return Ok(0);
+    }
+    let session = HistorySession::current().ok_or_else(|| anyhow!("not signed in"))?;
+    let token = session.access_token()?;
     let auth = format!("Bearer {token}");
     let hl = crate::store::settings_snapshot().language.clone();
     let url = format!("https://suggestqueries-clients6.youtube.com/complete/search?client=youtube-lr&ds=yt&xhr=t&q=&hl={}", http::urlencode(&hl));
@@ -406,21 +478,11 @@ pub fn sync_search_history() -> Result<usize> {
         .collect();
     // oldest first so the most recent remote search sorts highest among them
     let base = chrono::Utc::now().timestamp() - 7 * 86400;
-    let mut added = 0;
-    for (i, q) in queries.iter().enumerate() {
-        if crate::store::search_history_merge_remote(q, base - i as i64 * 60) {
-            added += 1;
-        }
-    }
-    Ok(added)
-}
-
-/// Removes a video from the account's YouTube watch history.
-pub fn remove_from_history(video_id: &str) -> Result<()> {
-    let token = removal_tokens().lock().get(video_id).cloned().ok_or_else(|| anyhow!("reload your history and try again"))?;
-    tv_call("feedback", json!({ "feedbackTokens": [token] }))?;
-    removal_tokens().lock().remove(video_id);
-    Ok(())
+    session.if_current(|| {
+        queries.iter().enumerate()
+            .filter(|(i, q)| crate::store::search_history_merge_remote(q, base - *i as i64 * 60))
+            .count()
+    }).ok_or_else(|| anyhow!("YouTube search history account changed"))
 }
 
 /// The signed-in user's subscriptions feed.
@@ -429,9 +491,31 @@ pub fn subscriptions_feed() -> Result<Page> {
     Ok(videos(collect_items(&r)))
 }
 
+/// The account's music picks: the Music tab of YouTube's TV app, which is
+/// personal when signed in. Each video opens as its YouTube Mix (radio), so it
+/// plays on into similar songs.
+pub fn music() -> Result<Page> {
+    let r = tv_call("browse", json!({ "browseId": "FEtopics_music" }))?;
+    Ok(as_mixes(videos(collect_items(&r))))
+}
+
+pub fn music_continue(token: &str) -> Result<Page> {
+    let r = tv_call("browse", json!({ "continuation": token }))?;
+    Ok(as_mixes(videos(collect_items(&r))))
+}
+
+/// Opens each video with its YouTube Mix ("RD" + video id) queued after it.
+fn as_mixes(mut page: Page) -> Page {
+    for item in &mut page.items {
+        if let Item::Video(v) = item {
+            v.playlist_id = Some(format!("RD{}", v.id));
+        }
+    }
+    page
+}
+
 pub fn browse_continue(token: &str) -> Result<Page> {
     let r = tv_call("browse", json!({ "continuation": token }))?;
-    harvest_removal_tokens(&r);
     Ok(videos(collect_items(&r)))
 }
 
@@ -478,7 +562,7 @@ pub fn subscribed_channels() -> Result<Vec<ChannelItem>> {
 }
 
 /// The account's subscriptions feed, following a few continuations.
-pub fn subscriptions_videos(max_pages: usize) -> Result<Vec<VideoItem>> {
+pub fn subscriptions_videos(max_pages: usize) -> Result<(Vec<VideoItem>, Option<String>)> {
     let mut page = subscriptions_feed()?;
     let mut out: Vec<VideoItem> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -487,15 +571,15 @@ pub fn subscriptions_videos(max_pages: usize) -> Result<Vec<VideoItem>> {
             Item::Video(v) if seen.insert(v.id.clone()) => Some(v),
             _ => None,
         }));
-        match page.continuation.take() {
-            Some(tok) if n + 1 < max_pages => match browse_continue(&tok) {
+        match page.continuation.as_deref() {
+            Some(tok) if n + 1 < max_pages => match browse_continue(tok) {
                 Ok(p) => page = p,
                 Err(_) => break,
             },
             _ => break,
         }
     }
-    Ok(out)
+    Ok((out, page.continuation))
 }
 
 /// Copies the account's subscriptions into the local list. Returns how many were new.
@@ -592,6 +676,56 @@ pub fn playlist(playlist_id: &str) -> Result<PlaylistPage> {
     Ok(PlaylistPage { info, description: None, videos, continuation: page.continuation })
 }
 
+/// Adds a video to one of the signed-in account's playlists.
+pub fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<()> {
+    edit_playlist(playlist_id, json!([{ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id }]), None)
+}
+
+pub(crate) fn set_account_playlist_saved(session: &Arc<()>, playlist_id: &str, video_id: &str, saved: bool) -> Result<()> {
+    let action = if saved {
+        json!({ "action": "ACTION_ADD_VIDEO", "addedVideoId": video_id })
+    } else {
+        json!({ "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": video_id })
+    };
+    edit_playlist(playlist_id, json!([action]), Some(session))
+}
+
+fn edit_playlist(playlist_id: &str, actions: Value, session: Option<&Arc<()>>) -> Result<()> {
+    let r = tv_call_for_session(
+        "browse/edit_playlist",
+        json!({ "playlistId": playlist_id, "actions": actions }),
+        session,
+    )?;
+    if let Some(s) = r.get("status").and_then(Value::as_str).filter(|s| *s != "STATUS_SUCCEEDED") {
+        return Err(anyhow!("edit_playlist: {s}"));
+    }
+    Ok(())
+}
+
+/// Removes several videos from one of the signed-in account's playlists.
+pub fn remove_many_from_playlist(playlist_id: &str, video_ids: &[String]) -> Result<()> {
+    for chunk in video_ids.chunks(50) {
+        let actions: Vec<Value> = chunk.iter().map(|id| json!({ "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": id })).collect();
+        edit_playlist(playlist_id, json!(actions), None)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn account_playlist_contains(session: &Arc<()>, playlist_id: &str, video_id: &str) -> Result<bool> {
+    let mut query = json!({ "browseId": format!("VL{playlist_id}") });
+    let mut cursors = std::collections::HashSet::new();
+    loop {
+        let response = tv_call_for_session("browse", query, Some(session))?;
+        let page = collect_items(&response);
+        if page.items.iter().any(|item| matches!(item, Item::Video(video) if video.id == video_id)) {
+            return Ok(true);
+        }
+        let Some(token) = page.continuation else { return Ok(false) };
+        anyhow::ensure!(cursors.insert(token.clone()), "YouTube repeated the playlist continuation");
+        query = json!({ "continuation": token });
+    }
+}
+
 /// Posts a message to a live stream's chat as the signed-in account.
 pub fn send_live_chat(channel_id: &str, video_id: &str, message: &str) -> Result<()> {
     // protobuf { 1: { 5: { 1: channel, 2: video } }, 2: 1, 3: 4 }
@@ -626,66 +760,4 @@ pub fn send_live_chat(channel_id: &str, video_id: &str, message: &str) -> Result
         anyhow::bail!(if t.is_empty() { "YouTube did not accept the message".to_string() } else { t });
     }
     Ok(())
-}
-
-/// Brings the account's YouTube watch history (from every device) into the local
-/// history, with resume positions. Returns how many videos were new here.
-pub fn sync_history(max_pages: usize) -> Result<usize> {
-    use crate::api::json::{find_all, parse_duration, text};
-    let mut r = tv_call("browse", json!({ "browseId": "FEhistory" }))?;
-    let now = crate::api::json::now();
-    let mut added = 0;
-    let mut n = 0i64;
-    for page in 0..max_pages {
-        let mut tiles = Vec::new();
-        find_all(&r, "tileRenderer", &mut tiles);
-        for t in tiles {
-            let Some(mut v) = crate::api::innertube::parse_tile(t) else { continue };
-            let resume = t.pointer("/onSelectCommand/watchEndpoint/startTimeSeconds").and_then(Value::as_f64).unwrap_or(0.0);
-            let mut overlays = Vec::new();
-            find_all(t, "thumbnailOverlayTimeStatusRenderer", &mut overlays);
-            let duration = overlays.first().and_then(|o| o.get("text")).map(text).as_deref().and_then(parse_duration).unwrap_or(0) as f64;
-            let mut pct = Vec::new();
-            find_all(t, "thumbnailOverlayResumePlaybackRenderer", &mut pct);
-            let percent = pct.first().and_then(|p| p.get("percentDurationWatched")).and_then(Value::as_f64).unwrap_or(0.0);
-            // a finished video has no start time but 100% watched
-            let progress = if resume > 0.0 { resume } else if percent >= 95.0 { duration } else { duration * percent / 100.0 };
-            if v.duration_secs.is_none() && duration > 0.0 {
-                v.duration_secs = Some(duration as u64);
-            }
-            // newest first: keep the account's order for entries new to this device
-            if crate::store::history_merge_remote(&v, progress, duration, now - n * 60) {
-                added += 1;
-            }
-            n += 1;
-        }
-        let Some(tok) = collect_items(&r).continuation else { break };
-        if page + 1 >= max_pages {
-            break;
-        }
-        r = tv_call("browse", json!({ "continuation": tok }))?;
-    }
-    Ok(added)
-}
-
-#[cfg(test)]
-mod live_tests {
-    #[test]
-    #[ignore]
-    fn history_live() {
-        if !super::signed_in() {
-            eprintln!("not signed in");
-            return;
-        }
-        let r = super::tv_call("browse", serde_json::json!({ "browseId": "FEhistory" })).unwrap();
-        std::fs::write(std::env::temp_dir().join("st_hist.json"), serde_json::to_string_pretty(&r).unwrap()).unwrap();
-        eprintln!("sync added {}", super::sync_history(2).unwrap());
-        let p = super::history().unwrap();
-        eprintln!("items={} cont={}", p.items.len(), p.continuation.is_some());
-        for i in p.items.iter().take(5) {
-            if let crate::api::types::Item::Video(v) = i {
-                eprintln!("  {} | {} | {:?}", v.id, v.title, v.published_text);
-            }
-        }
-    }
 }

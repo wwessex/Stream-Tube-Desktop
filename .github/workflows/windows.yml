@@ -105,6 +105,7 @@ jobs:
           $name = "StreamTube-$version-windows-x64"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
           Copy-Item target/release/streamtube.exe, third_party/mpv/libmpv-2.dll, README.md "dist/$name/"
+          New-Item -ItemType File -Path "dist/$name/streamtube.portable" | Out-Null
           New-Item -ItemType Directory -Force "dist/$name/vulkan" | Out-Null
           Copy-Item third_party/vulkan/vulkan-1.dll, third_party/vulkan/LICENSE.txt "dist/$name/vulkan/"
           Copy-Item LICENSE "dist/$name/LICENSE.txt"

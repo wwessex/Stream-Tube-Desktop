@@ -1041,9 +1041,9 @@ dependencies = [
 
 [[package]]
 name = "cookie"
-version = "0.18.2"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "percent-encoding",
  "time",
@@ -1336,12 +1336,6 @@ dependencies = [
  "link-section",
  "linktime-proc-macro",
 ]
-
-[[package]]
-name = "data-encoding"
-version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "data-url"
@@ -2930,6 +2924,8 @@ version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -3286,6 +3282,16 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5607,6 +5613,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
+name = "relative-path"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38540a682c6e9bca04a8bca9e5ec5a6ba168dfbb04c9998fe517a9befb92eb68"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5691,6 +5706,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rquickjs"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0a22bf72f515cc4189dd7c63d016f6de92a11eee98ddf7dd64794198f6eb34e"
+dependencies = [
+ "rquickjs-core",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6657979a24d543e5fc66f32cef2f47ca82ce8eb55cec5f7d59a12b7b570bbf24"
+dependencies = [
+ "hashbrown 0.17.2",
+ "relative-path",
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cee271d0eeba64f0915b846cb7ae02e16faf3dfdffdca91731101d9d30fe3423"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -6433,34 +6477,46 @@ checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "streamtube"
-version = "0.7.2-alpha"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "block2 0.6.2",
  "chrono",
  "dirs 6.0.0",
  "embed-resource",
  "futures",
  "gpui-kit",
  "gpui-pre",
+ "gpui-pre-macos",
+ "if-addrs",
  "image",
  "libc",
  "libloading 0.9.1",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-video",
  "objc2-foundation 0.3.2",
  "open",
  "parking_lot",
  "rand 0.9.5",
  "raw-window-handle",
+ "rquickjs",
  "rusqlite",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.11.1",
  "smallvec",
- "tungstenite",
+ "unicode-linebreak",
+ "unicode-segmentation",
  "ureq",
+ "url",
+ "wayland-client",
+ "wayland-protocols",
+ "windows 0.62.2",
+ "zbus 5.19.0",
 ]
 
 [[package]]
@@ -7091,22 +7147,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.10.4",
- "sha1",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -8558,9 +8598,7 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
 name = "xim-ctext"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ac61a7062c40f3c37b6e82eeeef835d5cc7824b632a72784a89b3963c33284c"
+version = "0.3.1"
 dependencies = [
  "encoding_rs",
 ]

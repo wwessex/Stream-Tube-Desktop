@@ -17,11 +17,13 @@ pub struct ImportReport {
 
 impl std::fmt::Display for ImportReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Imported {} subscriptions, {} history entries, {} playlists ({} videos)",
-            self.subscriptions, self.history, self.playlists, self.playlist_videos
-        )
+        f.write_str(&crate::i18n::tf!(
+            "Imported {0} subscriptions, {1} history entries, {2} playlists ({3} videos)",
+            self.subscriptions,
+            self.history,
+            self.playlists,
+            self.playlist_videos
+        ))
     }
 }
 
@@ -60,6 +62,10 @@ pub fn import_file(path: &Path) -> Result<ImportReport> {
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         if let Ok(v) = serde_json::from_str::<Value>(&text) {
             import_json_value(&v, &mut rep)?;
+            let backup = v.get("streamtube").is_some() || v.get("ferrotube").is_some();
+            if !backup && rep.subscriptions + rep.history + rep.playlists == 0 {
+                return Err(anyhow!(crate::i18n::t("Nothing to import in this file").to_string()));
+            }
             return Ok(rep);
         }
         // FreeTube .db = newline-delimited JSON
@@ -159,8 +165,9 @@ fn import_json_value(v: &Value, rep: &mut ImportReport) -> Result<()> {
         }
         return Ok(());
     }
-    // NewPipe subscriptions
-    if let Some(subs) = v.get("subscriptions").and_then(Value::as_array) {
+    // NewPipe subscriptions (entries carry a channel "url"; a one-line FreeTube
+    // profiles.db has "id" instead and is handled further down)
+    if let Some(subs) = newpipe_subscriptions(v) {
         for s in subs {
             if let Some(id) = s["url"].as_str().and_then(channel_id_from_url) {
                 store::subscribe(&id, s["name"].as_str().unwrap_or(&id), None);
@@ -200,6 +207,11 @@ fn import_json_value(v: &Value, rep: &mut ImportReport) -> Result<()> {
     }
     import_freetube_line(v, rep);
     Ok(())
+}
+
+fn newpipe_subscriptions(v: &Value) -> Option<&Vec<Value>> {
+    let subs = v.get("subscriptions")?.as_array()?;
+    (v.get("_id").is_none() && subs.iter().any(|s| s.get("url").is_some())).then_some(subs)
 }
 
 fn existing_or_new_playlist(name: &str) -> i64 {
@@ -349,5 +361,19 @@ mod tests {
     fn csv_split() {
         assert_eq!(split_csv("a,\"b, c\",d"), vec!["a", "b, c", "d"]);
         assert_eq!(channel_id_from_url("http://www.youtube.com/channel/UCsBjURrPoezykLs9EqgamOA"), Some("UCsBjURrPoezykLs9EqgamOA".into()));
+    }
+
+    #[test]
+    fn one_line_freetube_profile_is_not_newpipe() {
+        let freetube: Value = serde_json::from_str(
+            r#"{"_id":"allChannels","name":"All Channels","subscriptions":[{"id":"UCsyntheticChannelAAAA01","name":"A","thumbnail":"https://example.invalid/a.jpg"}]}"#,
+        )
+        .unwrap();
+        assert!(newpipe_subscriptions(&freetube).is_none());
+        let newpipe: Value = serde_json::from_str(
+            r#"{"app_version":"0.27","subscriptions":[{"service_id":0,"url":"https://www.youtube.com/channel/UCsBjURrPoezykLs9EqgamOA","name":"A"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(newpipe_subscriptions(&newpipe).map(Vec::len), Some(1));
     }
 }

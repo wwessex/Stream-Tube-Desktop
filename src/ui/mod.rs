@@ -1,10 +1,15 @@
 pub mod app;
 pub mod app_icon;
 pub mod cards;
+pub(crate) mod history;
 pub mod image_cache;
+pub mod music;
 pub mod pages;
 pub mod pip;
 pub mod slot;
+pub mod transcript_menu;
+#[cfg(target_os = "linux")]
+mod topbar_drag;
 pub mod widgets;
 
 use gpui_kit::*;
@@ -331,6 +336,8 @@ pub fn icon_button(id: impl Into<ElementId>, name: &str, cx: &App) -> Stateful<D
 pub fn pill(id: impl Into<ElementId>, icon_name: Option<&str>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
     let p = pal(cx);
     let label: SharedString = label.into();
+    let translated = crate::i18n::t(&label);
+    let label = if translated != label.as_ref() { SharedString::from(translated.to_owned()) } else { label };
     div()
         .id(id.into())
         .flex()
@@ -385,6 +392,18 @@ pub fn spinner(cx: &App) -> impl IntoElement {
         )
 }
 
+pub fn localize_placeholder(
+    input: &Entity<gpui_kit::component::input::InputState>,
+    source: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let text = crate::i18n::t(source);
+    if input.read(cx).presentation().placeholder().as_ref() != text {
+        input.update(cx, |state, cx| state.set_placeholder(text, window, cx));
+    }
+}
+
 pub fn empty_state(icon_name: &str, title: &str, subtitle: &str, cx: &App) -> Div {
     let p = pal(cx);
     div()
@@ -396,7 +415,7 @@ pub fn empty_state(icon_name: &str, title: &str, subtitle: &str, cx: &App) -> Di
         .py_20()
         .w_full()
         .child(icon(icon_name).size_16().text_color(p.text3))
-        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(title.to_string()))
+        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.text).child(crate::i18n::t(title).to_string()))
         .child(div().text_sm().text_color(p.text2).max_w(px(480.)).text_center().child(subtitle.to_string()))
 }
 
@@ -406,6 +425,7 @@ pub fn error_state(err: &str, cx: &App) -> Div {
 
 /// One readable line instead of raw HTTP bodies or error chains.
 pub fn friendly_error(err: &str) -> String {
+    use crate::i18n::{t, tf};
     let lower = err.to_ascii_lowercase();
     let status = lower
         .split("http ")
@@ -413,26 +433,29 @@ pub fn friendly_error(err: &str) -> String {
         .and_then(|r| r.get(..3))
         .and_then(|c| c.parse::<u16>().ok());
     match status {
-        Some(404) => return "This page isn't available.".into(),
-        Some(429) => return "YouTube is rate limiting requests. Try again in a minute.".into(),
-        Some(s) if (400..500).contains(&s) => return format!("YouTube rejected the request (HTTP {s})."),
-        Some(s) if s >= 500 => return format!("YouTube had a problem (HTTP {s}). Try again."),
+        Some(404) => return t("This page isn't available.").into(),
+        Some(429) => return t("YouTube is rate limiting requests. Try again in a minute.").into(),
+        Some(s) if (400..500).contains(&s) => return tf!("YouTube rejected the request (HTTP {0}).", s),
+        Some(s) if s >= 500 => return tf!("YouTube had a problem (HTTP {0}). Try again.", s),
         _ => {}
     }
     if ["dns", "timed out", "timeout", "connect", "network", "resolve"].iter().any(|k| lower.contains(k)) {
-        return "Couldn't reach YouTube. Check your connection.".into();
+        return t("Couldn't reach YouTube. Check your connection.").into();
     }
     if lower.contains("recording is not available") {
-        return "This live stream has ended and its recording isn't available.".into();
+        return t("This live stream has ended and its recording isn't available.").into();
     }
     if lower.contains("premieres in") || lower.contains("live event will begin") {
-        return "This hasn't started yet.".into();
+        return t("This hasn't started yet.").into();
     }
     if lower.contains("members-only") || lower.contains("join this channel") {
-        return "This video is for channel members only.".into();
+        return t("This video is for channel members only.").into();
     }
     if lower.contains("private video") {
-        return "This video is private.".into();
+        return t("This video is private.").into();
+    }
+    if lower.contains("playback stopped before the end of the video") {
+        return t("Playback stopped before the end of the video.").into();
     }
     let line = err.lines().next().unwrap_or(err).trim();
     // which YouTube client failed is a detail, not news
@@ -440,6 +463,11 @@ pub fn friendly_error(err: &str) -> String {
         .iter()
         .fold(line, |l, p| l.strip_prefix(p).unwrap_or(l));
     if line.chars().count() > 160 { format!("{}…", line.chars().take(160).collect::<String>()) } else { line.to_string() }
+}
+
+/// Scale each thumbnail's usual corner radius by the user's selected size.
+pub(crate) fn thumbnail_corner_scale() -> f32 {
+    crate::store::settings_snapshot().thumb_radius / 12.0
 }
 
 pub fn avatar(url: Option<&str>, size: Pixels, name: &str, cx: &App) -> AnyElement {
@@ -474,7 +502,12 @@ pub fn avatar(url: Option<&str>, size: Pixels, name: &str, cx: &App) -> AnyEleme
 
 pub fn copy_to_clipboard(text: String, cx: &mut App) {
     cx.write_to_clipboard(ClipboardItem::new_string(text));
-    toast(cx, "Link copied to clipboard");
+    toast(cx, crate::i18n::t("Link copied to clipboard"));
+}
+
+pub fn copy_text_to_clipboard(text: String, cx: &mut App) {
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
+    toast(cx, crate::i18n::t("Copied to clipboard"));
 }
 
 /// Brand colors of the Stream Tube logo.

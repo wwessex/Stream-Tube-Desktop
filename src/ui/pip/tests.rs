@@ -3,7 +3,6 @@ use crate::{
     player::{controller, view::PlayerView},
     ui::{
         Pal,
-        app::UiState,
         slot::{PlayerSlot, player_slot},
     },
 };
@@ -53,7 +52,7 @@ fn check_pip_handoff(cx: &mut TestAppContext, exit: Exit, paused_in_pip: bool) {
     let main_player = cx.update(|cx| {
         gpui_kit::init(cx);
         cx.set_global(Pal::new(true, 0x3ea6ff));
-        cx.set_global(UiState::default());
+        cx.set_global(crate::ui::app::UiState::default());
         cx.set_global(PlayerSlot::default());
         controller::init(cx);
         cx.on_window_closed(|cx, id| window_closed(id, cx)).detach();

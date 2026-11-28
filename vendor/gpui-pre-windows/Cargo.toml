@@ -191,6 +191,7 @@ features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_Ime",
     "Win32_UI_Input_Pointer",
+    "Win32_UI_Input_Touch",
 ]
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-core]
